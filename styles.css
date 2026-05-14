@@ -61,16 +61,35 @@ html, body {
   position: absolute;
   inset: 0;
   z-index: 3;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: clamp(14px, 2.3vh, 22px);
+  display: grid;
+  place-items: center;
   padding: max(24px, env(safe-area-inset-top)) 24px max(24px, env(safe-area-inset-bottom));
   text-align: center;
   pointer-events: none;
 }
 .overlay > * { pointer-events: auto; }
+
+/* Calm the canvas behind a centered overlay so the menu / result feel slick
+   instead of fighting the chaotic track for attention. */
+.overlay-dim {
+  background:
+    radial-gradient(ellipse at 50% 50%, rgba(2, 3, 10, 0.92) 0%, rgba(2, 3, 10, 0.78) 35%, rgba(2, 3, 10, 0.55) 68%, rgba(2, 3, 10, 0.3) 100%);
+  pointer-events: auto;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: clamp(14px, 2.4vh, 24px);
+  width: min(520px, calc(100vw - 32px));
+  padding: clamp(20px, 3vh, 32px) 24px;
+}
+
+.panel-result {
+  gap: clamp(20px, 3vh, 32px);
+}
+
 .hidden { display: none !important; }
 
 .sr-only {
@@ -82,106 +101,102 @@ html, body {
 /* — Menu — */
 .neon {
   font-family: "Courier New", ui-monospace, monospace;
-  font-size: clamp(52px, 10vw, 118px);
+  font-size: clamp(48px, 8.8vw, 104px);
   margin: 0;
-  letter-spacing: 0.16em;
+  letter-spacing: 0.18em;
   color: var(--cyan);
   line-height: 0.9;
   text-shadow:
-    0 0 8px var(--cyan),
-    0 0 24px var(--cyan),
-    0 0 56px rgba(41, 247, 255, 0.6),
-    0 0 96px rgba(41, 247, 255, 0.3);
+    0 0 6px var(--cyan),
+    0 0 18px var(--cyan),
+    0 0 44px rgba(41, 247, 255, 0.5);
 }
 
 .sub {
-  margin: 0;
+  margin: 0 0 4px;
   letter-spacing: 0.36em;
-  font-size: 12px;
-  color: var(--magenta);
-  text-shadow: 0 0 8px var(--magenta);
+  font-size: 11px;
+  color: rgba(255, 61, 240, 0.85);
+  text-shadow: 0 0 6px rgba(255, 61, 240, 0.55);
   text-transform: uppercase;
   font-weight: 700;
 }
 
 #question {
-  width: min(460px, calc(100vw - 48px));
-  padding: 14px 18px;
-  background: var(--panel);
-  border: 1px solid rgba(41, 247, 255, 0.4);
-  border-radius: 4px;
-  color: var(--cyan);
-  font-family: "Courier New", ui-monospace, monospace;
-  font-size: 16px;
+  width: min(420px, calc(100vw - 48px));
+  padding: 14px 16px;
+  background: rgba(2, 3, 10, 0.7);
+  border: 1px solid rgba(41, 247, 255, 0.22);
+  border-radius: 6px;
+  color: var(--text);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
+  font-size: 15px;
   text-align: center;
   outline: none;
-  box-shadow: 0 0 16px rgba(41, 247, 255, 0.15), inset 0 0 12px rgba(41, 247, 255, 0.08);
-  letter-spacing: 0.05em;
+  letter-spacing: 0;
+  transition: border-color 160ms, background-color 160ms;
   user-select: text;
 }
-#question::placeholder { color: rgba(216, 232, 255, 0.35); letter-spacing: 0.1em; }
+#question::placeholder { color: rgba(216, 232, 255, 0.3); }
+#question:hover { border-color: rgba(41, 247, 255, 0.36); }
 #question:focus {
-  border-color: var(--cyan);
-  box-shadow: 0 0 24px rgba(41, 247, 255, 0.4), inset 0 0 16px rgba(41, 247, 255, 0.15);
+  border-color: rgba(41, 247, 255, 0.7);
+  background: rgba(2, 3, 10, 0.85);
 }
 
 .big-btn {
-  padding: 20px 56px;
-  font-size: 28px;
-  font-weight: bold;
-  letter-spacing: 0.32em;
+  margin-top: 4px;
+  padding: 16px 52px;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.34em;
   color: var(--bg);
   background: var(--cyan);
   border: none;
   border-radius: 6px;
   cursor: pointer;
   font-family: "Courier New", ui-monospace, monospace;
-  box-shadow:
-    0 0 20px var(--cyan),
-    0 0 48px rgba(41, 247, 255, 0.55),
-    inset 0 -4px 0 rgba(0, 0, 0, 0.25);
-  transition: transform 90ms, box-shadow 200ms;
-  animation: cta-pulse 3.2s ease-in-out infinite;
+  box-shadow: 0 0 18px rgba(41, 247, 255, 0.55), 0 0 42px rgba(41, 247, 255, 0.28);
+  transition: transform 90ms, box-shadow 200ms, filter 200ms;
 }
-.big-btn:hover { transform: translateY(-2px) scale(1.02); box-shadow: 0 0 32px var(--cyan), 0 0 80px rgba(41, 247, 255, 0.7); }
-.big-btn:active { transform: translateY(1px) scale(0.99); }
-
-@keyframes cta-pulse {
-  0%, 100% { box-shadow: 0 0 20px var(--cyan), 0 0 48px rgba(41, 247, 255, 0.55), inset 0 -4px 0 rgba(0, 0, 0, 0.25); }
-  50%      { box-shadow: 0 0 28px var(--cyan), 0 0 72px rgba(41, 247, 255, 0.75), inset 0 -4px 0 rgba(0, 0, 0, 0.25); }
+.big-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 0 22px rgba(41, 247, 255, 0.75), 0 0 56px rgba(41, 247, 255, 0.4);
+  filter: brightness(1.05);
 }
+.big-btn:active { transform: translateY(1px); }
 
 .btn {
-  padding: 12px 24px;
+  padding: 12px 28px;
   font-family: "Courier New", ui-monospace, monospace;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 700;
-  letter-spacing: 0.14em;
+  letter-spacing: 0.22em;
   color: var(--cyan);
-  background: rgba(2, 3, 10, 0.55);
-  border: 1px solid var(--cyan);
-  border-radius: 4px;
+  background: transparent;
+  border: 1px solid rgba(41, 247, 255, 0.45);
+  border-radius: 6px;
   cursor: pointer;
   text-transform: uppercase;
-  box-shadow: 0 0 12px rgba(41, 247, 255, 0.25), inset 0 0 12px rgba(41, 247, 255, 0.08);
-  transition: all 160ms;
+  transition: background-color 160ms, border-color 160ms;
 }
-.btn:hover { background: rgba(41, 247, 255, 0.12); box-shadow: 0 0 24px rgba(41, 247, 255, 0.5); }
+.btn:hover { background: rgba(41, 247, 255, 0.08); border-color: var(--cyan); }
 
 .big-btn:focus-visible, .btn:focus-visible, #question:focus-visible {
   outline: 2px solid var(--amber);
-  outline-offset: 4px;
+  outline-offset: 3px;
 }
 
 .hint {
   margin: 0;
   font-size: 11px;
   color: var(--muted);
-  letter-spacing: 0.15em;
+  letter-spacing: 0.16em;
   text-transform: uppercase;
   max-width: 80vw;
   text-align: center;
 }
+.hint-quiet { color: rgba(216, 232, 255, 0.32); }
 .hint kbd {
   display: inline-block;
   padding: 2px 6px;
@@ -190,12 +205,10 @@ html, body {
   font-size: 10px;
   color: var(--cyan);
   background: rgba(2, 3, 10, 0.6);
-  border: 1px solid rgba(41, 247, 255, 0.35);
+  border: 1px solid rgba(41, 247, 255, 0.3);
   border-radius: 3px;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.04em;
 }
-
-.row { display: flex; gap: 16px; flex-wrap: wrap; justify-content: center; }
 
 /* — HUD (during race) — */
 .hud {
@@ -323,32 +336,11 @@ html, body {
   text-align: center;
 }
 
-.toast {
-  position: absolute; z-index: 5;
-  left: 50%; bottom: 28px;
-  margin: 0; padding: 10px 18px;
-  transform: translateX(-50%) translateY(8px);
-  background: rgba(2, 3, 10, 0.85);
-  color: var(--cyan);
-  border: 1px solid rgba(41, 247, 255, 0.45);
-  border-radius: 4px;
-  font-family: "Courier New", ui-monospace, monospace;
-  font-size: 12px;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  pointer-events: none;
-  opacity: 0;
-  transition: opacity 200ms, transform 200ms;
-  box-shadow: 0 0 18px rgba(41, 247, 255, 0.22);
-}
-.toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
-
 @media (max-width: 560px) {
-  .neon { font-size: clamp(44px, 15vw, 72px); letter-spacing: 0.1em; }
-  .sub, .hint { letter-spacing: 0.09em; }
-  .big-btn { width: min(280px, calc(100vw - 64px)); padding: 18px 28px; letter-spacing: 0.22em; }
-  .row { width: min(320px, calc(100vw - 48px)); }
-  .btn { width: 100%; }
+  .neon { font-size: clamp(42px, 14vw, 68px); letter-spacing: 0.12em; }
+  .sub, .hint { letter-spacing: 0.1em; }
+  .big-btn { width: min(260px, calc(100vw - 64px)); padding: 16px 24px; letter-spacing: 0.24em; }
+  .btn { width: min(260px, calc(100vw - 64px)); }
   .hud-question { font-size: 13px; }
 }
 
@@ -357,5 +349,4 @@ html, body {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
   }
-  .big-btn { animation: none; }
 }

@@ -31,9 +31,7 @@
   const resultMeta= document.getElementById('resultMeta');
   const flipBtn   = document.getElementById('flip');
   const againBtn  = document.getElementById('again');
-  const shareBtn  = document.getElementById('share');
   const muteBtn   = document.getElementById('mute');
-  const toast     = document.getElementById('toast');
   const qInput    = document.getElementById('question');
   const fatal     = document.getElementById('fatal');
 
@@ -965,26 +963,6 @@
       window.history.replaceState({}, '', u.toString());
     } catch (e) {}
   }
-  function shareUrl() {
-    try {
-      const u = new URL(window.location.href);
-      u.searchParams.set('seed', currentSeed.toString(16));
-      const q = (qInput.value || '').trim();
-      if (q) u.searchParams.set('q', q); else u.searchParams.delete('q');
-      return u.toString();
-    } catch (e) { return window.location.href; }
-  }
-  function showToast(msg) {
-    toast.textContent = msg;
-    toast.classList.remove('hidden');
-    requestAnimationFrame(() => toast.classList.add('show'));
-    clearTimeout(showToast._t);
-    showToast._t = setTimeout(() => {
-      toast.classList.remove('show');
-      setTimeout(() => toast.classList.add('hidden'), 220);
-    }, 1700);
-  }
-
   // ───────────────────────────── Main loop
   // Fixed-timestep physics + variable-rate rendering so behavior is identical
   // regardless of frame rate or rAF throttling.
@@ -1053,15 +1031,6 @@
     hud.classList.add('hidden');
     menu.classList.remove('hidden');
     qInput.focus();
-  });
-  shareBtn.addEventListener('click', async () => {
-    const url = shareUrl();
-    try {
-      await navigator.clipboard.writeText(url);
-      showToast('Link copied');
-    } catch (e) {
-      window.prompt('Copy this link', url);
-    }
   });
   muteBtn.addEventListener('click', () => {
     muted = !muted;

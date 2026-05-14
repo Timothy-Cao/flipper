@@ -40,27 +40,27 @@
     </div>
 
     <!-- Menu (visible before the race) -->
-    <section id="menu" class="overlay" aria-labelledby="title">
-      <h1 id="title" class="neon">FLIPPER</h1>
-      <p class="sub">Ask the universe.</p>
-      <label class="sr-only" for="question">A yes or no question</label>
-      <input id="question" type="text" placeholder="Ask a yes / no question…" maxlength="80" autocomplete="off" autocapitalize="sentences" spellcheck="false" enterkeyhint="go" />
-      <button id="flip" class="big-btn" type="button">DROP</button>
-      <p class="hint">Two marbles race. First to the finish wins. <kbd>Space</kbd> to drop.</p>
+    <section id="menu" class="overlay overlay-dim" aria-labelledby="title">
+      <div class="panel">
+        <h1 id="title" class="neon">FLIPPER</h1>
+        <p class="sub">Ask the universe.</p>
+        <label class="sr-only" for="question">A yes or no question</label>
+        <input id="question" type="text" placeholder="Ask a yes / no question" maxlength="80" autocomplete="off" autocapitalize="sentences" spellcheck="false" enterkeyhint="go" />
+        <button id="flip" class="big-btn" type="button">DROP</button>
+        <p class="hint hint-quiet"><kbd>Space</kbd> to drop</p>
+      </div>
     </section>
 
     <!-- Result screen -->
-    <section id="result" class="overlay hidden" aria-live="polite" aria-label="Race result">
-      <div id="verdict" class="verdict" aria-live="assertive"></div>
-      <p id="resultMeta" class="hint result-meta"></p>
-      <div class="row">
+    <section id="result" class="overlay overlay-dim hidden" aria-live="polite" aria-label="Race result">
+      <div class="panel panel-result">
+        <div id="verdict" class="verdict" aria-live="assertive"></div>
+        <p id="resultMeta" class="hint result-meta"></p>
         <button id="again" class="btn" type="button">Drop again</button>
-        <button id="share" class="btn" type="button" title="Copy a shareable link">Share</button>
       </div>
     </section>
 
     <p id="fatal" class="fatal hidden" role="alert"></p>
-    <p id="toast" class="toast hidden" role="status" aria-live="polite"></p>
   </main>
 
   <script src="app.js"></script>
