@@ -1,1094 +1,904 @@
-/* FLIPPER — Rube Goldberg yes/no oracle.
- * Physics: Matter.js  |  Render: Canvas 2D  |  Audio: Tone.js
- * Everything is emergent. Seeded RNG so we can replay & probe for butterfly points.
+/* FLIPPER — neon marble race oracle.
+ *
+ * Two marbles (YES cyan, NO magenta) drop down a long vertical course
+ * stuffed with pegs, spinners, hammers, gears, and funnels. The camera
+ * follows whichever marble is in the lead. First to cross the finish
+ * line answers the question.
+ *
+ * Architecture, deliberately tiny:
+ *   - Hand-rolled physics: gravity + per-frame integration + closed-form
+ *     collision against circles and segments. No Matter.js.
+ *   - Static obstacles are baked into one offscreen canvas at race start.
+ *     Each frame, one `drawImage` blits the visible slice. Kinematic
+ *     obstacles (spinning arms, hammers, gears) are redrawn per frame.
+ *   - Spatial bucketing: obstacles are bucketed into vertical slabs so
+ *     each ball only collides against the few it could touch.
+ *
+ * No build step. Open index.html.
  */
 
 (() => {
   // ───────────────────────────── DOM
-  const canvas   = document.getElementById('world');
-  const ctx      = canvas.getContext('2d');
-  const menu     = document.getElementById('menu');
-  const banner   = document.getElementById('banner');
-  const result   = document.getElementById('result');
-  const verdict  = document.getElementById('verdict');
-  const butterfly= document.getElementById('butterfly');
-  const flipBtn  = document.getElementById('flip');
-  const againBtn = document.getElementById('again');
-  const replayBtn= document.getElementById('replay');
-  const qInput   = document.getElementById('question');
-  const fatal    = document.getElementById('fatal');
-  const muteBtn  = document.getElementById('mute');
-  const shareBtn = document.getElementById('share');
-  const toast    = document.getElementById('toast');
+  const canvas    = document.getElementById('world');
+  const ctx       = canvas.getContext('2d', { alpha: false });
+  const menu      = document.getElementById('menu');
+  const hud       = document.getElementById('hud');
+  const banner    = document.getElementById('banner');
+  const scoreYes  = document.querySelector('.chip-yes');
+  const scoreNo   = document.querySelector('.chip-no');
+  const result    = document.getElementById('result');
+  const verdict   = document.getElementById('verdict');
+  const resultMeta= document.getElementById('resultMeta');
+  const flipBtn   = document.getElementById('flip');
+  const againBtn  = document.getElementById('again');
+  const shareBtn  = document.getElementById('share');
+  const muteBtn   = document.getElementById('mute');
+  const toast     = document.getElementById('toast');
+  const qInput    = document.getElementById('question');
+  const fatal     = document.getElementById('fatal');
 
-  if (!window.Matter) {
-    if (fatal) {
-      fatal.textContent = 'FLIPPER needs Matter.js to run. Check your connection and refresh.';
-      fatal.classList.remove('hidden');
-    }
-    menu?.classList.add('hidden');
-    return;
-  }
-
-  const { Engine, World, Bodies, Body, Composite, Constraint, Events } = window.Matter;
-  const ToneLib = window.Tone;
-
-  const W = canvas.width, H = canvas.height;
-  function syncCanvasScale() {
+  const W = canvas.width, H_VIEW = canvas.height;     // logical dimensions
+  function syncDpr() {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const targetW = Math.round(W * dpr);
-    const targetH = Math.round(H * dpr);
-    if (canvas.width !== targetW || canvas.height !== targetH) {
-      canvas.width = targetW;
-      canvas.height = targetH;
+    const physW = Math.round(W * dpr), physH = Math.round(H_VIEW * dpr);
+    if (canvas.width !== physW || canvas.height !== physH) {
+      canvas.width = physW; canvas.height = physH;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     }
   }
-  syncCanvasScale();
-  window.addEventListener('resize', syncCanvasScale);
+  syncDpr();
+  window.addEventListener('resize', syncDpr);
 
-  // ───────────────────────────── RNG (Mulberry32) — seeded for replay
+  // ───────────────────────────── RNG (Mulberry32)
   function mulberry32(seed) {
     let a = seed >>> 0;
     return function() {
-      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      a = (a + 0x6D2B79F5) | 0;
       let t = Math.imul(a ^ (a >>> 15), 1 | a);
       t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
       return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
     };
   }
   let rand = Math.random;
-  const rrange = (a, b) => a + (b - a) * rand();
+  const rrange = (a, b) => a + rand() * (b - a);
   const choice = (arr) => arr[Math.floor(rand() * arr.length)];
 
-  // ───────────────────────────── Audio
-  const A = {
-    ready: false,
-    metal: null, soft: null, magnet: null,
-    yes: null, no: null, hum: null,
-    async init() {
-      if (this.ready) return;
-      if (!ToneLib) return;
-      await ToneLib.start();
-      this.metal = new ToneLib.MetalSynth({
-        frequency: 240, envelope: { attack: 0.001, decay: 0.18, release: 0.1 },
-        harmonicity: 4.1, modulationIndex: 18, resonance: 3500, octaves: 1.2,
-        volume: -18
-      }).toDestination();
-      this.soft = new ToneLib.MembraneSynth({
-        pitchDecay: 0.04, octaves: 4, envelope: { attack: 0.001, decay: 0.2, sustain: 0 },
-        volume: -16
-      }).toDestination();
-      this.magnet = new ToneLib.FMSynth({
-        harmonicity: 2.6, modulationIndex: 6,
-        envelope: { attack: 0.002, decay: 0.25, sustain: 0, release: 0.2 },
-        volume: -20
-      }).toDestination();
-      this.lead = new ToneLib.Synth({
-        oscillator: { type: 'sawtooth' },
-        envelope: { attack: 0.01, decay: 0.2, sustain: 0.1, release: 0.4 },
-        volume: -14
-      }).toDestination();
-      // ambient hum
-      this.hum = new ToneLib.Oscillator(55, 'sine').toDestination();
-      this.hum.volume.value = -34;
-      this.hum.start();
-      this.ready = true;
-    },
-    blip(kind, v = 1) {
-      if (!this.ready) return;
-      const t = ToneLib.now();
-      v = Math.min(1, Math.max(0.05, v));
-      try {
-        if (kind === 'metal') this.metal.triggerAttackRelease('C2', '16n', t, v * 0.6);
-        else if (kind === 'soft') this.soft.triggerAttackRelease(80 + rand() * 40, '8n', t, v * 0.7);
-        else if (kind === 'magnet') this.magnet.triggerAttackRelease(220 + rand() * 80, '16n', t, v * 0.5);
-        else if (kind === 'sign') this.lead.triggerAttackRelease('G4', '8n', t, v);
-      } catch (e) {}
-    },
-    arpeggio(up) {
-      if (!this.ready) return;
-      const notes = up ? ['C4', 'E4', 'G4', 'C5', 'E5'] : ['E5', 'C5', 'G4', 'E4', 'C4'];
-      const t = ToneLib.now();
-      notes.forEach((n, i) => this.lead.triggerAttackRelease(n, '8n', t + i * 0.09, 0.8));
-    }
+  // ───────────────────────────── World constants
+  const SECTION_H        = 700;     // px tall per generated section
+  const SECTION_COUNT    = 8;       // ≈ 5600 px course
+  const START_PAD        = 220;     // free-fall pad above first section
+  const FINISH_PAD       = 360;     // funnel + finish band below last section
+  const WORLD_H          = START_PAD + SECTION_H * SECTION_COUNT + FINISH_PAD;
+  const FINISH_Y         = START_PAD + SECTION_H * SECTION_COUNT + 60;
+
+  // Tuned for a 15s–90s race with lots of variance. The marbles bounce, get
+  // stuck, find shortcuts — variance is the point.
+  const GRAVITY          = 0.40;    // px / frame² (60fps reference)
+  const AIR_DRAG_X       = 0.992;
+  const AIR_DRAG_Y       = 0.999;
+  const TERMINAL_VY      = 8.5;
+  const RESTITUTION      = 0.5;
+  const BALL_R           = 14;
+  const BALL_FRICTION    = 0.99;
+  const SUBSTEPS         = 3;       // physics sub-steps per render frame
+
+  const COLORS = {
+    bg:        '#03040a',
+    bg_far:    '#08091a',
+    cyan:      '#29f7ff',
+    magenta:   '#ff3df0',
+    wallCyan:  'rgba(41, 247, 255, 0.55)',
+    wallMag:   'rgba(255, 61, 240, 0.55)',
+    finish:    '#ffd84a'
   };
 
-  // ───────────────────────────── World
-  let engine, world, ball, signs, paddleBody;
-  let particles = [];        // ball trail
-  let sparks = [];           // collision sparks
-  let modules = {};          // references to module bodies for drawing
-  let camera = { x: W/2, y: H/2, zoom: 1, targetX: W/2, targetY: H/2, targetZoom: 1 };
-  let runStartTime = 0;
-  let currentSeed = 0;
-  let outcome = null;        // 'yes' | 'no'
-  let mode = 'idle';         // 'idle' | 'running' | 'done' | 'replaying'
-  let slowmoFactor = 1;      // engine time scale
-  let highlightStep = -1;    // butterfly step to highlight
-  let highlightHitAt = 0;    // when, in replay, the butterfly step was first reached
-  let resultDim = 0;         // 0..1 — alpha of the dim wash behind the verdict
-  const stepLabels = ['flick', 'plinko', 'seesaw', 'module', 'final'];
-  let currentStepIndex = 0;
-  const reducedMotion =
-    typeof window.matchMedia === 'function' &&
-    window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  // ───────────────────────────── State
+  let staticObs    = [];     // baked into staticCanvas; still referenced for collision
+  let kinObs       = [];     // redrawn each frame
+  let bucketsH     = 100;    // height of one spatial bucket in px
+  let buckets      = [];     // array indexed by floor(y / bucketsH) → list of obstacle refs
+  let balls        = [];
+  let particles    = [];     // tiny spark pool for collision pops
+  let cameraY      = 0;
+  let cameraTargetY= 0;
+  let mode         = 'idle'; // 'idle' | 'racing' | 'finishing' | 'done'
+  let winner       = null;
+  let raceStart    = 0;
+  let raceElapsed  = 0;
+  let finishDelay  = 0;      // counted down while finishing
+  let currentSeed  = 0;
+  let pendingSeed  = null;
 
-  // ───────────────────────────── Build scene
-  function clearWorld() {
-    if (engine) { World.clear(world, false); Engine.clear(engine); }
-    engine = Engine.create();
-    world = engine.world;
-    engine.gravity.y = 1.2;
-    particles = []; sparks = []; modules = {};
-    currentStepIndex = 0;
+  // ───────────────────────────── Offscreen prerender
+  const staticCanvas = document.createElement('canvas');
+  staticCanvas.width = W;
+  staticCanvas.height = WORLD_H;
+  const sctx = staticCanvas.getContext('2d', { alpha: false });
+
+  // ───────────────────────────── Audio (lazy, tiny Web Audio setup)
+  let audioCtx = null, masterGain = null, muted = false;
+  try { muted = localStorage.getItem('flipper.muted') === '1'; } catch (e) {}
+
+  function ensureAudio() {
+    if (audioCtx) return;
+    try {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      masterGain = audioCtx.createGain();
+      masterGain.gain.value = muted ? 0 : 0.45;
+      masterGain.connect(audioCtx.destination);
+    } catch (e) { /* no audio */ }
+  }
+  function applyMuteUI() {
+    muteBtn.setAttribute('aria-pressed', muted ? 'true' : 'false');
+    muteBtn.setAttribute('aria-label', muted ? 'Unmute audio' : 'Mute audio');
+    const x  = muteBtn.querySelector('#muteX');
+    const wv = muteBtn.querySelector('#muteWv');
+    if (x)  x.style.display  = muted ? '' : 'none';
+    if (wv) wv.style.display = muted ? 'none' : '';
+    if (masterGain) masterGain.gain.value = muted ? 0 : 0.45;
+  }
+  applyMuteUI();
+
+  function blip(freq, durMs, type = 'square', vol = 0.18) {
+    if (muted || !audioCtx) return;
+    const t0 = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, t0);
+    osc.frequency.exponentialRampToValueAtTime(freq * 0.5, t0 + durMs / 1000);
+    g.gain.setValueAtTime(vol, t0);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + durMs / 1000);
+    osc.connect(g).connect(masterGain);
+    osc.start(t0);
+    osc.stop(t0 + durMs / 1000 + 0.02);
+  }
+  function chord(freqs, durMs = 320, type = 'sawtooth') {
+    if (muted || !audioCtx) return;
+    const t0 = audioCtx.currentTime;
+    for (let i = 0; i < freqs.length; i++) {
+      const f = freqs[i];
+      const osc = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      osc.type = type;
+      osc.frequency.value = f;
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(0.18, t0 + 0.02 + i * 0.04);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + durMs / 1000);
+      osc.connect(g).connect(masterGain);
+      osc.start(t0 + i * 0.04);
+      osc.stop(t0 + durMs / 1000 + 0.02);
+    }
   }
 
-  function build(seed) {
-    rand = mulberry32(seed);
-    currentSeed = seed;
-    clearWorld();
-
-    // walls
-    const wallOpt = { isStatic: true, restitution: 0.4, friction: 0.4, label: 'wall' };
-    World.add(world, [
-      Bodies.rectangle(W/2, H + 20, W, 60, wallOpt),
-      Bodies.rectangle(-20, H/2, 40, H * 2, wallOpt),
-      Bodies.rectangle(W + 20, H/2, 40, H * 2, wallOpt),
-    ]);
-
-    // ──── Step 1: Worm + ball at top — random side, random flick direction
-    const startSide = rand() < 0.5 ? -1 : 1;        // worm on left or right
-    const startX = W / 2 + startSide * (W * 0.30 + rrange(-12, 12));
-    const startY = 90;
-    const wormDir = -startSide;                      // worm tail trails away from center
-    const wormSegments = [];
-    let prev = null;
-    const segCount = 6 + Math.floor(rand() * 3);
-    for (let i = 0; i < segCount; i++) {
-      const seg = Bodies.circle(startX + wormDir * (20 + i * 14), startY + Math.sin(i) * 4, 7, {
-        friction: 0.2, restitution: 0.3, density: 0.002, label: 'worm'
-      });
-      wormSegments.push(seg);
-      if (prev) {
-        World.add(world, Constraint.create({
-          bodyA: prev, bodyB: seg, length: 14, stiffness: 0.6, damping: 0.2
-        }));
-      }
-      prev = seg;
-    }
-    // anchor first segment loosely
-    World.add(world, Constraint.create({
-      pointA: { x: startX + wormDir * 20, y: startY },
-      bodyB: wormSegments[0], pointB: { x: 0, y: 0 },
-      length: 0, stiffness: 0.05, damping: 0.1
-    }));
-    World.add(world, wormSegments);
-    modules.worm = wormSegments;
-
-    // Ball
-    ball = Bodies.circle(startX, startY, 11, {
-      restitution: 0.55, friction: 0.005, frictionAir: 0.001,
-      density: 0.006, label: 'ball'
-    });
-    World.add(world, ball);
-
-    // ──── Step 2: Plinko field
-    const pegs = [];
-    const rows = 5;
-    const pegY0 = 220;
-    const pegSpacingY = 46;
-    for (let r = 0; r < rows; r++) {
-      const cols = 5 + (r % 2);
-      const gap = W / (cols + 1);
-      for (let c = 0; c < cols; c++) {
-        const px = gap * (c + 1) + ((r % 2) ? -gap / 2 : 0) + rrange(-6, 6);
-        const py = pegY0 + r * pegSpacingY + rrange(-3, 3);
-        const angle = rrange(-Math.PI / 36, Math.PI / 36); // ±5°
-        const peg = Bodies.rectangle(px, py, 28, 6, {
-          isStatic: true, angle, restitution: rrange(0.45, 0.65),
-          friction: 0.05, label: 'peg'
-        });
-        pegs.push(peg);
-      }
-    }
-    World.add(world, pegs);
-    modules.pegs = pegs;
-
-    // ──── Step 3: Seesaw
-    const seesawY = 500;
-    const seesawX = W / 2 + rrange(-30, 30);
-    const seesaw = Bodies.rectangle(seesawX, seesawY, 220, 8, {
-      restitution: rrange(0.4, 0.6), friction: 0.3, density: 0.004, label: 'seesaw'
-    });
-    Body.setAngle(seesaw, rrange(-0.05, 0.05));
-    World.add(world, seesaw);
-    World.add(world, Constraint.create({
-      pointA: { x: seesawX, y: seesawY },
-      bodyB: seesaw, pointB: { x: 0, y: 0 },
-      length: 0, stiffness: 0.9, damping: 0.1
-    }));
-    modules.seesaw = seesaw;
-
-    // ──── Step 4: Random module
-    const modY = 620;
-    const modKind = choice(['dominoes', 'hammer', 'frog', 'magnet']);
-    modules.kind = modKind;
-    if (modKind === 'dominoes') {
-      const arr = [];
-      const baseX = 110 + rrange(-10, 10);
-      for (let i = 0; i < 5; i++) {
-        const d = Bodies.rectangle(baseX + i * 50, modY, 8, 44, {
-          restitution: 0.2, friction: 0.5, density: 0.003, label: 'domino'
-        });
-        arr.push(d);
-      }
-      World.add(world, arr);
-      modules.dominoes = arr;
-      // floor under dominoes
-      const ledge = Bodies.rectangle(W/2, modY + 26, W * 0.7, 8, {
-        isStatic: true, angle: rrange(-0.02, 0.02), label: 'ledge'
-      });
-      World.add(world, ledge);
-      modules.ledge = ledge;
-    } else if (modKind === 'hammer') {
-      const px = W/2 + rrange(-30, 30);
-      const py = modY - 70;
-      const hammer = Bodies.rectangle(px, py + 60, 16, 90, {
-        density: 0.01, friction: 0.2, restitution: 0.4, label: 'hammer'
-      });
-      Body.setAngle(hammer, rrange(-0.6, 0.6));
-      World.add(world, hammer);
-      World.add(world, Constraint.create({
-        pointA: { x: px, y: py },
-        bodyB: hammer, pointB: { x: 0, y: -45 },
-        length: 0, stiffness: 0.95
-      }));
-      modules.hammer = hammer;
-    } else if (modKind === 'frog') {
-      const px = W/2 + rrange(-80, 80);
-      const frog = Bodies.polygon(px, modY, 3, 22, {
-        restitution: 0.4, friction: 0.3, density: 0.005, label: 'frog'
-      });
-      World.add(world, frog);
-      modules.frog = frog;
-      modules.frogTimer = rrange(0.4, 1.4);
-      // ledge for frog
-      const ledge = Bodies.rectangle(W/2, modY + 28, W * 0.6, 8, {
-        isStatic: true, angle: rrange(-0.02, 0.02), label: 'ledge'
-      });
-      World.add(world, ledge);
-      modules.ledge = ledge;
-    } else { // magnet
-      const px = W/2 + rrange(-60, 60);
-      const bumper = Bodies.circle(px, modY, 26, {
-        isStatic: true, restitution: 1.0, label: 'magnet'
-      });
-      World.add(world, bumper);
-      modules.magnet = bumper;
-      modules.magnetSign = rand() < 0.5 ? -1 : 1;
-      modules.magnetStrength = rrange(0.0006, 0.0012);
-    }
-
-    // ──── Step 5: Funnel + final paddle + signs
-    const floorY = 880;
-    const slopeL = Bodies.rectangle(W * 0.22, 780, 220, 8, {
-      isStatic: true, angle: rrange(0.22, 0.32), label: 'slope'
-    });
-    const slopeR = Bodies.rectangle(W * 0.78, 780, 220, 8, {
-      isStatic: true, angle: rrange(-0.32, -0.22), label: 'slope'
-    });
-    World.add(world, [slopeL, slopeR]);
-    modules.slopes = [slopeL, slopeR];
-
-    // Spider (decorative creature) tucked above the YES/NO signs.
-    // Articulated legs animated in the loop; `alert` ramps up when the ball is close.
-    const spiderX = W/2 + rrange(-20, 20);
-    const spiderY = 820;
-    modules.spider = {
-      x: spiderX,
-      y: spiderY,
-      phase: rand() * Math.PI * 2,
-      alert: 0
-    };
-
-    // Paddle that the ball strikes — it tips and tells us yes/no
-    const paddleY = 850;
-    const paddle = Bodies.rectangle(W/2, paddleY, 26, 26, {
-      density: 0.003, restitution: 0.3, friction: 0.4, label: 'paddle'
-    });
-    Body.setAngle(paddle, rrange(-0.1, 0.1));
-    World.add(world, paddle);
-    World.add(world, Constraint.create({
-      pointA: { x: W/2, y: paddleY + 18 },
-      bodyB: paddle, pointB: { x: 0, y: 8 },
-      length: 0, stiffness: 0.7, damping: 0.05
-    }));
-    paddleBody = paddle;
-
-    // Signs — sensors covering full bottom width so any ball lands in one of them.
-    // Visual signs render at center of each half; the sensor itself spans the full half.
-    const yesZone = Bodies.rectangle(W * 0.25, floorY, W * 0.5, 60, {
-      isStatic: true, isSensor: true, label: 'yes'
-    });
-    const noZone = Bodies.rectangle(W * 0.75, floorY, W * 0.5, 60, {
-      isStatic: true, isSensor: true, label: 'no'
-    });
-    World.add(world, [yesZone, noZone]);
-    signs = { yes: yesZone, no: noZone, yesGlow: 0, noGlow: 0, decided: null };
-
-    // ground
-    const ground = Bodies.rectangle(W/2, floorY + 26, W * 1.5, 10, {
-      isStatic: true, label: 'ground'
-    });
-    World.add(world, ground);
-
-    // Initial worm flick — direction biased toward center but jittered enough to favor either side.
-    // Animated as a wind-up: the worm visibly pulls back, then snaps forward into the ball.
-    const flickPower = rrange(0.013, 0.022);
-    const flickAngle = rrange(-0.35, 0.35);
-    const flickSign = -startSide;                     // toward the opposite side
-    modules.flick = { power: flickPower, angle: flickAngle, sign: flickSign, startSide };
-
-    // Cache of wind-affected bodies so the gust loop doesn't traverse all bodies.
-    modules.windTargets = Composite.allBodies(world).filter(
-      b => !b.isStatic && b.mass < 0.05 && b.label !== 'ball'
-    );
-
-    modules.windUp = {
-      t: 0,
-      pullUntil: 320,    // ms of "pull back" before release
-      fireAt: 620,       // ms when the impulse actually fires
-      fired: false,
-      sign: startSide,
-      flickSign
-    };
-  }
-
-  // ───────────────────────────── Collision handling
-  function attachCollisionHandlers() {
-    Events.on(engine, 'collisionStart', (ev) => {
-      for (const p of ev.pairs) {
-        const a = p.bodyA, b = p.bodyB;
-        const other = a.label === 'ball' ? b : (b.label === 'ball' ? a : null);
-        if (!other) continue;
-        const v = Math.min(20, Math.hypot(ball.velocity.x, ball.velocity.y));
-        const intensity = Math.min(1, v / 12);
-        // sparks
-        const sp = p.collision.supports[0] || ball.position;
-        for (let i = 0; i < 4 + Math.floor(intensity * 6); i++) {
-          sparks.push({
-            x: sp.x, y: sp.y,
-            vx: rrange(-3, 3), vy: rrange(-3, 3),
-            life: 1, color: choice(['#29f7ff', '#ff3df0'])
-          });
-        }
-        if (other.label === 'peg') {
-          A.blip('metal', intensity);
-          if (currentStepIndex < 2) currentStepIndex = 2;
-        } else if (other.label === 'seesaw' || other.label === 'ledge' || other.label === 'slope') {
-          A.blip('soft', intensity * 0.8);
-          if (currentStepIndex < 3) currentStepIndex = 3;
-        } else if (other.label === 'magnet') {
-          A.blip('magnet', intensity);
-          if (currentStepIndex < 4) currentStepIndex = 4;
-        } else if (other.label === 'domino' || other.label === 'hammer' || other.label === 'frog') {
-          A.blip('metal', intensity * 0.7);
-          if (other.label === 'frog' && modules.frog) {
-            modules.frogFlinch = 0.001;            // small flinch pulse, decays in loop
-          }
-          if (currentStepIndex < 4) currentStepIndex = 4;
-        } else if (other.label === 'paddle') {
-          A.blip('metal', intensity * 1.2);
-          if (currentStepIndex < 5) currentStepIndex = 5;
-          // brief zoom pulse on the climactic strike
-          camera.targetZoom = Math.max(camera.targetZoom, 1.12);
-        } else if (other.label === 'worm') {
-          A.blip('soft', intensity * 0.5);
-        }
-
-        // Outcome detection
-        if (other.label === 'yes' && !signs.decided) {
-          signs.decided = 'yes';
-          finishRun('yes');
-        } else if (other.label === 'no' && !signs.decided) {
-          signs.decided = 'no';
-          finishRun('no');
-        }
-      }
-    });
-  }
-
-  // ───────────────────────────── Run lifecycle
-  function startFlip(seed) {
-    if (mode === 'running' || mode === 'replaying') return;
-    mode = 'running';
-    slowmoFactor = 1;
-    outcome = null;
-    highlightStep = -1;
-    highlightHitAt = 0;
-    resultDim = 0;
+  // ───────────────────────────── Course generation
+  function buildCourse(seed) {
+    rand = mulberry32(seed >>> 0);
     currentSeed = seed >>> 0;
-    menu.classList.add('hidden');
-    result.classList.add('hidden');
-    butterfly.textContent = '';
-    butterfly.classList.remove('butterfly-armed');
-    const q = qInput.value.trim();
-    banner.textContent = q ? `“${q}”` : '';
-    banner.classList.toggle('hidden', !q);
-    build(currentSeed);
-    attachCollisionHandlers();
-    camera.x = W/2; camera.y = H/2;
-    camera.targetX = W/2; camera.targetY = H/2;
-    camera.zoom = 1; camera.targetZoom = 1;
-    stuckFrames = 0; lastBallY = ball.position.y;
-    runStartTime = performance.now();
-    // Safety timeout: if nothing decides within 9s, force decision by ball x
-    setTimeout(() => {
-      if (!signs?.decided && (mode === 'running' || mode === 'replaying')) {
-        finishRun(ball.position.x < W/2 ? 'yes' : 'no');
-      }
-    }, 9000);
+    staticObs = [];
+    kinObs = [];
+    buckets = [];
+
+    // Side walls
+    pushStaticSegment(20, 0, 20, WORLD_H, 4, COLORS.cyan);
+    pushStaticSegment(W - 20, 0, W - 20, WORLD_H, 4, COLORS.magenta);
+
+    // Sections
+    const templates = ['pegfield', 'spinners', 'funnel', 'hammers', 'cross', 'gauntlet'];
+    let lastTemplate = null;
+    for (let s = 0; s < SECTION_COUNT; s++) {
+      const y0 = START_PAD + s * SECTION_H;
+      let pick;
+      // avoid repeating the same template back-to-back
+      do { pick = choice(templates); } while (pick === lastTemplate);
+      lastTemplate = pick;
+      buildSection(pick, y0);
+    }
+
+    // Finish band: gentle funnel into the finish line
+    buildFinishBand(START_PAD + SECTION_COUNT * SECTION_H);
+
+    // Build spatial buckets
+    bucketsH = 120;
+    const N = Math.ceil(WORLD_H / bucketsH) + 1;
+    buckets = new Array(N);
+    for (let i = 0; i < N; i++) buckets[i] = [];
+    const insert = (o, yMin, yMax) => {
+      const a = Math.max(0, Math.floor(yMin / bucketsH));
+      const b = Math.min(N - 1, Math.floor(yMax / bucketsH));
+      for (let i = a; i <= b; i++) buckets[i].push(o);
+    };
+    for (const o of staticObs) {
+      if (o.kind === 'circle')        insert(o, o.y - o.r - 2, o.y + o.r + 2);
+      else if (o.kind === 'segment')  insert(o, Math.min(o.y1, o.y2) - 2, Math.max(o.y1, o.y2) + 2);
+    }
+    for (const o of kinObs) {
+      // worst-case bounding for moving obstacles
+      if (o.kind === 'arm' || o.kind === 'gear') insert(o, o.cy - o.length - 6, o.cy + o.length + 6);
+      else if (o.kind === 'hammer')              insert(o, o.cy - 8, o.cy + o.length + o.bobR + 8);
+    }
   }
 
-  function finishRun(which) {
-    if (outcome) return;
-    outcome = which;
-    signs.decided = which;
-    // climactic slow-mo + zoom (skipped under reduced-motion)
-    camera.targetZoom = reducedMotion ? 1 : 1.6;
-    slowmoFactor = reducedMotion ? 1 : 0.3;
-    A.arpeggio(which === 'yes');
-    const dwell = reducedMotion ? 150 : 1300;
-    setTimeout(() => {
-      mode = 'done';
-      slowmoFactor = 1;
-      camera.targetZoom = 1;
-      verdict.textContent = which.toUpperCase();
-      verdict.className = 'verdict ' + which;
-      result.classList.remove('hidden');
-      writeUrlState();
-      // compute butterfly point asynchronously
-      computeButterfly(currentSeed, which).then(step => {
-        if (step >= 0 && stepLabels[step]) {
-          butterfly.textContent =
-            `BUTTERFLY POINT · STEP ${step + 1} — ${stepLabels[step].toUpperCase()}`;
-          highlightStep = step;
-        } else {
-          butterfly.textContent = 'NO CLEAR BUTTERFLY POINT — RUN WAS STABLE';
-          highlightStep = -1;
-        }
+  function pushStaticSegment(x1, y1, x2, y2, thick, color) {
+    staticObs.push({ kind: 'segment', x1, y1, x2, y2, thick, color });
+  }
+  function pushStaticCircle(x, y, r, color) {
+    staticObs.push({ kind: 'circle', x, y, r, color });
+  }
+
+  // — Section templates —
+  function buildSection(template, y0) {
+    if (template === 'pegfield')      return buildPegfield(y0);
+    if (template === 'spinners')      return buildSpinners(y0);
+    if (template === 'funnel')        return buildFunnel(y0);
+    if (template === 'hammers')       return buildHammers(y0);
+    if (template === 'cross')         return buildCross(y0);
+    if (template === 'gauntlet')      return buildGauntlet(y0);
+  }
+
+  function buildPegfield(y0) {
+    const rows = 6;
+    const inset = 50;
+    for (let r = 0; r < rows; r++) {
+      const cols = 6 + (r % 2);
+      const span = W - inset * 2;
+      const gap = span / (cols + 1);
+      for (let c = 0; c < cols; c++) {
+        const px = inset + gap * (c + 1) + ((r % 2) ? -gap / 2 : 0) + rrange(-4, 4);
+        const py = y0 + 80 + r * 95 + rrange(-3, 3);
+        pushStaticCircle(px, py, 9, COLORS.cyan);
+      }
+    }
+  }
+
+  function buildSpinners(y0) {
+    const count = 2 + Math.floor(rand() * 2);
+    for (let i = 0; i < count; i++) {
+      const cx = 100 + rrange(0, W - 200);
+      const cy = y0 + 130 + i * (SECTION_H - 260) / Math.max(1, count - 1);
+      const length = rrange(70, 110);
+      const omega = rrange(0.020, 0.045) * (rand() < 0.5 ? -1 : 1);
+      kinObs.push({
+        kind: 'arm',
+        cx, cy, length, omega,
+        angle: rand() * Math.PI * 2,
+        thick: 9,
+        color: COLORS.magenta
       });
-    }, dwell);
+      // peg at pivot to keep balls from getting glued there
+      pushStaticCircle(cx, cy, 7, COLORS.cyan);
+    }
+    // a few stray pegs to scatter trajectories
+    for (let i = 0; i < 5; i++) {
+      pushStaticCircle(rrange(60, W - 60), y0 + rrange(80, SECTION_H - 80), 7, COLORS.cyan);
+    }
   }
 
-  // ───────────────────────────── Butterfly point estimator
-  // Re-run the exact same seeded scene N times, each time injecting a tiny random
-  // impulse at one step boundary. The step with the highest flip rate is the
-  // moment where the smallest nudge would have changed the outcome.
-  async function computeButterfly(seed, baseOutcome) {
-    const steps = 5;
-    const samples = 6;
-    const flips = new Array(steps).fill(0);
-    for (let s = 0; s < steps; s++) {
-      for (let k = 0; k < samples; k++) {
-        const o = await silentRun(seed, s, k);
-        if (o && o !== baseOutcome) flips[s]++;
-        if (k % 3 === 0) await new Promise(r => setTimeout(r, 0));
-      }
-    }
-    let bestStep = -1, bestRate = 0;
-    for (let s = 0; s < steps; s++) {
-      const rate = flips[s] / samples;
-      if (rate > bestRate) { bestRate = rate; bestStep = s; }
-    }
-    return bestRate > 0 ? bestStep : -1;
+  function buildFunnel(y0) {
+    // Two angled walls forming a wide-to-narrow funnel, then a small gap.
+    const top = y0 + 80;
+    const bottom = y0 + SECTION_H - 100;
+    const gap = rrange(80, 120);
+    const cx = W / 2 + rrange(-30, 30);
+    pushStaticSegment(40,        top,        cx - gap / 2, bottom, 6, COLORS.cyan);
+    pushStaticSegment(W - 40,    top,        cx + gap / 2, bottom, 6, COLORS.magenta);
+    // a couple of bumpers at the funnel mouth
+    pushStaticCircle(cx - gap / 2 - 14, bottom, 8, COLORS.cyan);
+    pushStaticCircle(cx + gap / 2 + 14, bottom, 8, COLORS.magenta);
+    // small ramps below the gap so the next section catches the flow
+    pushStaticSegment(40, bottom + 40, cx - 60, bottom + 40, 4, COLORS.cyan);
+    pushStaticSegment(W - 40, bottom + 40, cx + 60, bottom + 40, 4, COLORS.magenta);
   }
 
-  // Simulate without rendering. Returns 'yes' | 'no' | null.
-  // Builds a fresh scene via build(seed), steps the resulting engine to completion,
-  // optionally nudging the ball when the run reaches `perturbStep`.
-  function silentRun(seed, perturbStep, sampleId = 0) {
-    return new Promise(resolve => {
-      const origRand = rand;
-      // snapshot real-run globals
-      const realEngine = engine, realWorld = world, realBall = ball,
-            realSigns = signs, realModules = modules,
-            realStep = currentStepIndex, realSeed = currentSeed,
-            realPaddle = paddleBody;
-      try {
-        build(seed);                // creates new engine/world/ball/signs/modules in globals
-        const localRand = mulberry32((seed ^ (0xA53F + sampleId * 7919)) >>> 0);
-        let done = null;
-        // Perturb when stepIndex first reaches perturbStep+1 (i.e., entering that phase).
-        // Magnitude is tiny — the whole point is to detect butterfly-sensitive steps.
-        const checkStep = () => {
-          if (currentStepIndex >= perturbStep + 1 && !modules._perturbed && ball) {
-            modules._perturbed = true;
-            const theta = localRand() * Math.PI * 2;
-            const mag = 0.004;
-            Body.applyForce(ball, ball.position, {
-              x: Math.cos(theta) * mag, y: Math.sin(theta) * mag
-            });
-          }
-        };
-        Events.on(engine, 'collisionStart', (ev) => {
-          for (const p of ev.pairs) {
-            const other = p.bodyA.label === 'ball' ? p.bodyB :
-                          p.bodyB.label === 'ball' ? p.bodyA : null;
-            if (!other) continue;
-            if (other.label === 'peg') {
-              if (currentStepIndex < 2) currentStepIndex = 2;
-            } else if (['seesaw','ledge','slope'].includes(other.label)) {
-              if (currentStepIndex < 3) currentStepIndex = 3;
-            } else if (['magnet','domino','hammer','frog'].includes(other.label)) {
-              if (currentStepIndex < 4) currentStepIndex = 4;
-            } else if (other.label === 'paddle') {
-              if (currentStepIndex < 5) currentStepIndex = 5;
-            }
-            checkStep();
-            if (other.label === 'yes' && !done) done = 'yes';
-            if (other.label === 'no' && !done) done = 'no';
-          }
-        });
-        // Trigger the initial flick now (real run uses a 600ms setTimeout)
-        const f = modules.flick;
-        Body.applyForce(ball, ball.position, {
-          x: f.sign * Math.cos(f.angle) * f.power,
-          y: Math.abs(Math.sin(f.angle)) * f.power * 0.3 + 0.005
-        });
-        currentStepIndex = 1;
+  function buildHammers(y0) {
+    // 2 swinging hammers alternating sides, plus a center divider with slits.
+    const dividerX = W / 2 + rrange(-10, 10);
+    pushStaticSegment(dividerX, y0 + 30, dividerX, y0 + 200, 3, 'rgba(41,247,255,0.35)');
+    pushStaticSegment(dividerX, y0 + 280, dividerX, y0 + SECTION_H - 80, 3, 'rgba(255,61,240,0.35)');
 
-        const dt = 1000/60;
-        for (let i = 0; i < 60 * 14 && !done; i++) {
-          if (modules.kind === 'magnet' && modules.magnet) {
-            const dx = modules.magnet.position.x - ball.position.x;
-            const dy = modules.magnet.position.y - ball.position.y;
-            const d2 = dx*dx + dy*dy;
-            if (d2 < 200*200 && d2 > 1) {
-              const f = modules.magnetStrength * modules.magnetSign / Math.sqrt(d2);
-              Body.applyForce(ball, ball.position, { x: dx * f, y: dy * f });
-            }
-          }
-          Engine.update(engine, dt);
-          checkStep();
-          if (ball.position.y > H - 40 && !done) {
-            done = ball.position.x < W/2 ? 'yes' : 'no';
-          }
-        }
-        // Tear down this scene
-        World.clear(world, false);
-        Engine.clear(engine);
-        // restore real-run globals
-        engine = realEngine; world = realWorld; ball = realBall;
-        signs = realSigns; modules = realModules;
-        currentStepIndex = realStep; currentSeed = realSeed;
-        paddleBody = realPaddle;
-        rand = origRand;
-        resolve(done);
-      } catch (e) {
-        engine = realEngine; world = realWorld; ball = realBall;
-        signs = realSigns; modules = realModules;
-        currentStepIndex = realStep; currentSeed = realSeed;
-        paddleBody = realPaddle;
-        rand = origRand;
-        resolve(null);
-      }
+    const hammerCount = 2;
+    for (let i = 0; i < hammerCount; i++) {
+      const side = (i % 2 === 0) ? -1 : 1;
+      const cx = W / 2 + side * (W * 0.30);
+      const cy = y0 + 140 + i * 280;
+      kinObs.push({
+        kind: 'hammer',
+        cx, cy,
+        length: 110 + rrange(-10, 10),
+        bobR: 22,
+        baseAngle: side > 0 ? -Math.PI / 2 - 0.6 : -Math.PI / 2 + 0.6,
+        amp: 1.0 + rrange(-0.1, 0.1),
+        phase: rand() * Math.PI * 2,
+        omega: rrange(0.035, 0.06),
+        color: side > 0 ? COLORS.magenta : COLORS.cyan,
+        thick: 6
+      });
+    }
+  }
+
+  function buildCross(y0) {
+    // X-shaped peg cluster with a center diamond — fan-out chaos.
+    const cx = W / 2;
+    const cy = y0 + SECTION_H / 2;
+    // diamond outline (4 segments)
+    const d = 100;
+    pushStaticSegment(cx - d, cy, cx, cy - d, 4, COLORS.cyan);
+    pushStaticSegment(cx, cy - d, cx + d, cy, 4, COLORS.magenta);
+    pushStaticSegment(cx + d, cy, cx, cy + d, 4, COLORS.magenta);
+    pushStaticSegment(cx, cy + d, cx - d, cy, 4, COLORS.cyan);
+    // pegs at the corners
+    pushStaticCircle(cx - d, cy, 10, COLORS.cyan);
+    pushStaticCircle(cx + d, cy, 10, COLORS.magenta);
+    pushStaticCircle(cx, cy - d, 10, COLORS.cyan);
+    pushStaticCircle(cx, cy + d, 10, COLORS.magenta);
+    // gear-like spinner above and below
+    kinObs.push({
+      kind: 'gear', cx: 120, cy: y0 + 130, length: 60, r: 24, teeth: 8,
+      angle: 0, omega: rrange(0.025, 0.045) * (rand() < 0.5 ? -1 : 1), color: COLORS.cyan
+    });
+    kinObs.push({
+      kind: 'gear', cx: W - 120, cy: y0 + SECTION_H - 130, length: 60, r: 24, teeth: 8,
+      angle: 0, omega: rrange(0.025, 0.045) * (rand() < 0.5 ? -1 : 1), color: COLORS.magenta
     });
   }
 
-  // ───────────────────────────── Main loop
-  let lastT = performance.now();
-  let stuckFrames = 0;
-  let lastBallY = 0;
-  function loop(t) {
-    const dt = Math.min(40, t - lastT);
-    lastT = t;
-
-    if (mode === 'running' || mode === 'replaying') {
-      // Worm wind-up: visibly pull head back, then fire impulse into the ball.
-      if (modules.windUp && !modules.windUp.fired && modules.worm) {
-        const wu = modules.windUp;
-        wu.t += dt * slowmoFactor;
-        const head = modules.worm[modules.worm.length - 1];
-        if (wu.t < wu.pullUntil) {
-          // pull the worm head AWAY from the ball (back toward its anchor side)
-          Body.applyForce(head, head.position, {
-            x: wu.sign * 0.0018,
-            y: -0.0006
-          });
-        }
-        if (wu.t >= wu.fireAt) {
-          wu.fired = true;
-          const f = modules.flick;
-          Body.applyForce(ball, ball.position, {
-            x: f.sign * Math.cos(f.angle) * f.power,
-            y: Math.abs(Math.sin(f.angle)) * f.power * 0.3 + 0.005
-          });
-          // worm recoil — head snaps forward then bounces back
-          Body.applyForce(head, head.position, { x: -wu.sign * 0.0035, y: -0.004 });
-          A.blip('soft', 0.8);
-          if (currentStepIndex < 1) currentStepIndex = 1;
-        }
-      }
-
-      // magnet pull on live engine
-      if (modules.kind === 'magnet' && modules.magnet && ball) {
-        const dx = modules.magnet.position.x - ball.position.x;
-        const dy = modules.magnet.position.y - ball.position.y;
-        const d2 = dx*dx + dy*dy;
-        if (d2 < 200*200 && d2 > 1) {
-          const fmag = modules.magnetStrength * modules.magnetSign / Math.sqrt(d2);
-          Body.applyForce(ball, ball.position, { x: dx * fmag, y: dy * fmag });
-        }
-      }
-
-      // occasional wind gust on light bodies — cached list, not full traversal.
-      if (rand() < 0.01 && modules.windTargets) {
-        const wind = (rand() - 0.5) * 0.0008;
-        for (const b of modules.windTargets) {
-          Body.applyForce(b, b.position, { x: wind, y: 0 });
-        }
-      }
-
-      // frog occasional hop + flinch decay
-      if (modules.kind === 'frog' && modules.frog) {
-        modules.frogTimer -= dt / 1000;
-        if (modules.frogTimer <= 0) {
-          Body.applyForce(modules.frog, modules.frog.position, {
-            x: (rand() - 0.5) * 0.004,
-            y: -0.012
-          });
-          modules.frogTimer = rrange(0.6, 1.6);
-        }
-        if (modules.frogFlinch > 0) {
-          modules.frogFlinch = Math.max(0, modules.frogFlinch - dt * 0.0035);
-        }
-      }
-
-      // Spider proximity twitch — accelerate leg phase + offset when ball is close.
-      if (modules.spider && ball) {
-        const sp = modules.spider;
-        const ddx = sp.x - ball.position.x;
-        const ddy = sp.y - ball.position.y;
-        const dist = Math.hypot(ddx, ddy);
-        sp.alert = Math.max(0, sp.alert - dt * 0.003);
-        if (dist < 90) sp.alert = Math.min(1, sp.alert + 0.08);
-      }
-
-      Engine.update(engine, dt * slowmoFactor);
-
-      // ball trail particle
-      if (ball) {
-        particles.push({ x: ball.position.x, y: ball.position.y, life: 1 });
-        if (particles.length > 40) particles.shift();
-      }
-
-      // Anti-stuck: if the ball isn't making downward progress, nudge it.
-      // Only kicks in after the wind-up so the ball isn't yanked off the worm.
-      if (ball && (!modules.windUp || modules.windUp.fired)) {
-        const ddy = ball.position.y - lastBallY;
-        if (ddy < 0.5) {
-          stuckFrames++;
-          if (stuckFrames > 40) {
-            Body.applyForce(ball, ball.position, {
-              x: (rand() - 0.5) * 0.014, y: 0.006
-            });
-            stuckFrames = 0;
-          }
-        } else {
-          stuckFrames = 0;
-        }
-        lastBallY = ball.position.y;
-      }
-
-      // Butterfly tracking during replay — stamp the moment we first reach the step.
-      if (mode === 'replaying' && highlightStep >= 0 && highlightHitAt === 0 &&
-          currentStepIndex >= highlightStep + 1) {
-        highlightHitAt = performance.now();
-      }
-
-      // camera follow — gentle bias toward the ball's vertical position
-      if (ball) {
-        camera.targetX = W/2 + (ball.position.x - W/2) * 0.25;
-        camera.targetY = Math.max(H * 0.45, Math.min(H * 0.62, ball.position.y * 0.55 + H * 0.28));
+  function buildGauntlet(y0) {
+    // Serpentine ledges with gaps.
+    let leftEdge = 30, rightEdge = W - 30;
+    const steps = 5;
+    for (let i = 0; i < steps; i++) {
+      const yy = y0 + 90 + i * (SECTION_H - 160) / (steps - 1);
+      const side = i % 2;       // 0 = ledge from left, 1 = ledge from right
+      const len = rrange(W * 0.55, W * 0.72);
+      if (side === 0) {
+        pushStaticSegment(leftEdge, yy, leftEdge + len, yy + rrange(20, 40), 5, COLORS.cyan);
+      } else {
+        pushStaticSegment(rightEdge, yy, rightEdge - len, yy + rrange(20, 40), 5, COLORS.magenta);
       }
     }
-
-    // Result dim — fades up after outcome is set; sits behind the verdict text.
-    if (outcome && mode !== 'replaying') {
-      resultDim = Math.min(0.55, resultDim + 0.02);
-    } else {
-      resultDim = Math.max(0, resultDim - 0.04);
-    }
-
-    // camera smoothing
-    camera.x += (camera.targetX - camera.x) * 0.06;
-    camera.y += (camera.targetY - camera.y) * 0.06;
-    camera.zoom += (camera.targetZoom - camera.zoom) * 0.04;
-
-    // sign glow pulse on outcome
-    if (signs && outcome === 'yes') signs.yesGlow = Math.min(1, signs.yesGlow + 0.04);
-    if (signs && outcome === 'no')  signs.noGlow  = Math.min(1, signs.noGlow + 0.04);
-
-    render();
-    scheduleNext(loop);
   }
 
-  function scheduleNext(fn) {
-    let called = false;
-    const guard = (t) => { if (called) return; called = true; fn(t || performance.now()); };
-    const id = setTimeout(() => guard(performance.now()), 24);
-    requestAnimationFrame((t) => { clearTimeout(id); guard(t); });
+  function buildFinishBand(y0) {
+    // Two slope walls funneling everyone into the finish strip.
+    pushStaticSegment(40, y0,            W * 0.36, y0 + 200, 6, COLORS.cyan);
+    pushStaticSegment(W - 40, y0,        W * 0.64, y0 + 200, 6, COLORS.magenta);
+    // The finish line is drawn separately; collision-wise it's not solid.
+  }
+
+  // ───────────────────────────── Prerender static layer
+  function prerenderStatic() {
+    sctx.fillStyle = COLORS.bg;
+    sctx.fillRect(0, 0, W, WORLD_H);
+
+    // Faint grid every 100px so vertical motion reads
+    sctx.strokeStyle = 'rgba(41, 247, 255, 0.045)';
+    sctx.lineWidth = 1;
+    for (let y = 0; y < WORLD_H; y += 100) {
+      sctx.beginPath(); sctx.moveTo(0, y); sctx.lineTo(W, y); sctx.stroke();
+    }
+
+    // Static obstacles
+    sctx.lineCap = 'round';
+    for (const o of staticObs) {
+      if (o.kind === 'circle') {
+        sctx.fillStyle = o.color === COLORS.magenta ? 'rgba(255,61,240,0.16)' : 'rgba(41,247,255,0.16)';
+        sctx.beginPath();
+        sctx.arc(o.x, o.y, o.r, 0, Math.PI * 2);
+        sctx.fill();
+        sctx.strokeStyle = o.color;
+        sctx.lineWidth = 2;
+        sctx.stroke();
+      } else if (o.kind === 'segment') {
+        sctx.strokeStyle = o.color;
+        sctx.lineWidth = o.thick;
+        sctx.beginPath();
+        sctx.moveTo(o.x1, o.y1); sctx.lineTo(o.x2, o.y2);
+        sctx.stroke();
+      }
+    }
+
+    // Finish line band
+    const fy = FINISH_Y;
+    const grad = sctx.createLinearGradient(0, fy - 6, 0, fy + 70);
+    grad.addColorStop(0, 'rgba(255, 216, 74, 0.0)');
+    grad.addColorStop(0.4, 'rgba(255, 216, 74, 0.35)');
+    grad.addColorStop(1, 'rgba(255, 216, 74, 0.0)');
+    sctx.fillStyle = grad;
+    sctx.fillRect(0, fy - 6, W, 76);
+    // Checker bands
+    sctx.fillStyle = COLORS.finish;
+    const stripe = 20;
+    for (let x = 0; x < W; x += stripe) {
+      sctx.fillRect(x, fy, stripe / 2, 4);
+      sctx.fillRect(x + stripe / 2, fy + 8, stripe / 2, 4);
+    }
+    // Label
+    sctx.font = 'bold 22px "Courier New", monospace';
+    sctx.fillStyle = COLORS.finish;
+    sctx.textAlign = 'center';
+    sctx.fillText('FINISH', W / 2, fy + 44);
+  }
+
+  // ───────────────────────────── Collision helpers
+  function collideCircle(b, cx, cy, cr) {
+    const dx = b.x - cx, dy = b.y - cy;
+    const d2 = dx * dx + dy * dy;
+    const minD = b.r + cr;
+    if (d2 >= minD * minD || d2 < 0.0001) return false;
+    const d = Math.sqrt(d2);
+    const nx = dx / d, ny = dy / d;
+    const overlap = minD - d;
+    b.x += nx * overlap;
+    b.y += ny * overlap;
+    const vDotN = b.vx * nx + b.vy * ny;
+    if (vDotN < 0) {
+      b.vx -= (1 + RESTITUTION) * vDotN * nx;
+      b.vy -= (1 + RESTITUTION) * vDotN * ny;
+    }
+    return true;
+  }
+
+  function collideSegment(b, x1, y1, x2, y2, halfThick) {
+    const dx = x2 - x1, dy = y2 - y1;
+    const segLen2 = dx * dx + dy * dy;
+    if (segLen2 < 0.0001) return false;
+    let t = ((b.x - x1) * dx + (b.y - y1) * dy) / segLen2;
+    if (t < 0) t = 0; else if (t > 1) t = 1;
+    const cx = x1 + t * dx, cy = y1 + t * dy;
+    const dxc = b.x - cx, dyc = b.y - cy;
+    const d2 = dxc * dxc + dyc * dyc;
+    const minD = b.r + halfThick;
+    if (d2 >= minD * minD || d2 < 0.0001) return false;
+    const d = Math.sqrt(d2);
+    const nx = dxc / d, ny = dyc / d;
+    const overlap = minD - d;
+    b.x += nx * overlap;
+    b.y += ny * overlap;
+    const vDotN = b.vx * nx + b.vy * ny;
+    if (vDotN < 0) {
+      b.vx -= (1 + RESTITUTION) * vDotN * nx;
+      b.vy -= (1 + RESTITUTION) * vDotN * ny;
+    }
+    return true;
+  }
+
+  function spark(x, y, color, n) {
+    for (let i = 0; i < n; i++) {
+      particles.push({
+        x, y,
+        vx: (rand() - 0.5) * 3.6,
+        vy: (rand() - 0.5) * 3.6 - 0.6,
+        life: 0.4 + rand() * 0.3,
+        color
+      });
+    }
+    if (particles.length > 80) particles.splice(0, particles.length - 80);
+  }
+
+  // ───────────────────────────── Physics step
+  function step(dt) {
+    // Update kinematic obstacles first
+    for (const o of kinObs) {
+      if (o.kind === 'arm' || o.kind === 'gear') {
+        o.angle += o.omega * dt;
+      } else if (o.kind === 'hammer') {
+        o.phase += o.omega * dt;
+        o.angle = o.baseAngle + Math.sin(o.phase) * o.amp;
+      }
+    }
+
+    // Integrate + collide each ball
+    for (const b of balls) {
+      if (!b.alive || b.finished) continue;
+
+      // Forces
+      b.vy += GRAVITY * dt;
+      if (b.vy > TERMINAL_VY) b.vy = TERMINAL_VY;
+      b.vx *= Math.pow(AIR_DRAG_X, dt);
+      b.vy *= Math.pow(AIR_DRAG_Y, dt);
+
+      // Integrate
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+
+      // Walls (cheap)
+      if (b.x < 22 + b.r) { b.x = 22 + b.r; if (b.vx < 0) b.vx = -b.vx * RESTITUTION; }
+      if (b.x > W - 22 - b.r) { b.x = W - 22 - b.r; if (b.vx > 0) b.vx = -b.vx * RESTITUTION; }
+
+      // Bucket lookup
+      const bucketIdx = Math.floor(b.y / bucketsH);
+      let hit = false;
+      for (let bi = Math.max(0, bucketIdx - 1); bi <= Math.min(buckets.length - 1, bucketIdx + 1); bi++) {
+        const list = buckets[bi];
+        for (let oi = 0; oi < list.length; oi++) {
+          const o = list[oi];
+          if (o.kind === 'circle') {
+            if (collideCircle(b, o.x, o.y, o.r)) {
+              hit = true;
+              if (b._cooldown <= 0) {
+                spark(b.x, b.y, b.color, 5);
+                blip(360 + rand() * 80, 60, 'square', 0.06);
+                b._cooldown = 0.08;
+              }
+            }
+          } else if (o.kind === 'segment') {
+            if (collideSegment(b, o.x1, o.y1, o.x2, o.y2, o.thick / 2)) {
+              hit = true;
+              if (b._cooldown <= 0) {
+                spark(b.x, b.y, b.color, 4);
+                blip(280 + rand() * 60, 80, 'sawtooth', 0.05);
+                b._cooldown = 0.08;
+              }
+            }
+          } else if (o.kind === 'arm') {
+            const ex = o.cx + Math.cos(o.angle) * o.length;
+            const ey = o.cy + Math.sin(o.angle) * o.length;
+            if (collideSegment(b, o.cx, o.cy, ex, ey, o.thick / 2)) {
+              hit = true;
+              // tangential kick
+              const tx = -Math.sin(o.angle), ty = Math.cos(o.angle);
+              const kick = o.omega * o.length * 1.2;
+              b.vx += tx * kick * 0.5;
+              b.vy += ty * kick * 0.5;
+              if (b._cooldown <= 0) {
+                spark(b.x, b.y, o.color, 6);
+                blip(180, 100, 'sawtooth', 0.07);
+                b._cooldown = 0.1;
+              }
+            }
+          } else if (o.kind === 'gear') {
+            // gear is a circle plus teeth — approximate as a slightly bigger circle for collision
+            if (collideCircle(b, o.cx, o.cy, o.r + 4)) {
+              hit = true;
+              // tangential spin
+              const dx = b.x - o.cx, dy = b.y - o.cy;
+              const dlen = Math.hypot(dx, dy) || 1;
+              const tx = -dy / dlen, ty = dx / dlen;
+              const kick = o.omega * (o.r + 4) * 1.0;
+              b.vx += tx * kick * 0.4;
+              b.vy += ty * kick * 0.4;
+              if (b._cooldown <= 0) {
+                spark(b.x, b.y, o.color, 5);
+                blip(240, 80, 'square', 0.05);
+                b._cooldown = 0.08;
+              }
+            }
+          } else if (o.kind === 'hammer') {
+            const bx = o.cx + Math.cos(o.angle) * o.length;
+            const by = o.cy + Math.sin(o.angle) * o.length;
+            // shaft
+            collideSegment(b, o.cx, o.cy, bx, by, o.thick / 2);
+            // bob
+            if (collideCircle(b, bx, by, o.bobR)) {
+              hit = true;
+              // hammer head adds a hard tangential punch
+              const tx = -Math.sin(o.angle), ty = Math.cos(o.angle);
+              const kick = o.omega * o.length * o.amp * 1.4;
+              b.vx += tx * kick * 0.6;
+              b.vy += ty * kick * 0.6;
+              if (b._cooldown <= 0) {
+                spark(b.x, b.y, o.color, 8);
+                blip(140, 130, 'sawtooth', 0.09);
+                b._cooldown = 0.12;
+              }
+            }
+          }
+        }
+      }
+
+      b._cooldown = Math.max(0, b._cooldown - 0.016 * dt);
+
+      // Light friction when in contact
+      if (hit) {
+        b.vx *= BALL_FRICTION;
+        b.vy *= BALL_FRICTION;
+      }
+
+      // Trail (sparse)
+      b._trailT = (b._trailT || 0) + dt;
+      if (b._trailT > 1.6) {
+        b._trailT = 0;
+        b.trail.push(b.x, b.y);
+        if (b.trail.length > 24) b.trail.splice(0, 2);
+      }
+
+      // Finish?
+      if (!b.finished && b.y >= FINISH_Y) {
+        b.finished = true;
+        if (winner === null) {
+          winner = b.label;
+          mode = 'finishing';
+          finishDelay = 1.0;       // sec of hold before result reveal
+          chord(b.label === 'yes' ? [392, 494, 587, 784] : [330, 261, 196, 165], 480, 'sawtooth');
+        }
+      }
+    }
+
+    // Ball-ball soft contact (gives them a chance to bump and trade lead)
+    if (balls.length === 2 && balls[0].alive && balls[1].alive) {
+      const a = balls[0], c = balls[1];
+      const dx = c.x - a.x, dy = c.y - a.y;
+      const d2 = dx * dx + dy * dy;
+      const minD = a.r + c.r;
+      if (d2 < minD * minD && d2 > 0.0001) {
+        const d = Math.sqrt(d2);
+        const nx = dx / d, ny = dy / d;
+        const overlap = minD - d;
+        a.x -= nx * overlap * 0.5; a.y -= ny * overlap * 0.5;
+        c.x += nx * overlap * 0.5; c.y += ny * overlap * 0.5;
+        const va = a.vx * nx + a.vy * ny;
+        const vc = c.vx * nx + c.vy * ny;
+        const dv = vc - va;
+        a.vx += dv * nx * 0.7; a.vy += dv * ny * 0.7;
+        c.vx -= dv * nx * 0.7; c.vy -= dv * ny * 0.7;
+      }
+    }
+
+    // Particles
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.vy += 0.18 * dt;
+      p.life -= 0.025 * dt;
+      if (p.life <= 0) particles.splice(i, 1);
+    }
+  }
+
+  // ───────────────────────────── Camera
+  function updateCamera(dt) {
+    // Follow the leader (greatest y). If the race is over, stay on the winner.
+    let leadY = 0;
+    if (winner) {
+      const b = balls.find(b => b.label === winner);
+      leadY = b ? b.y : leadY;
+    } else {
+      for (const b of balls) if (b.y > leadY) leadY = b.y;
+    }
+    cameraTargetY = leadY - H_VIEW * 0.42;
+    if (cameraTargetY < 0) cameraTargetY = 0;
+    if (cameraTargetY > WORLD_H - H_VIEW) cameraTargetY = WORLD_H - H_VIEW;
+    // Smooth lerp
+    const k = mode === 'finishing' ? 0.06 : 0.14;
+    cameraY += (cameraTargetY - cameraY) * Math.min(1, k * dt);
   }
 
   // ───────────────────────────── Rendering
-  function applyCamera() {
-    ctx.translate(W/2, H/2);
-    ctx.scale(camera.zoom, camera.zoom);
-    ctx.translate(-camera.x, -camera.y);
-  }
-
   function render() {
-    // BG — vertical gradient
-    const bg = ctx.createLinearGradient(0, 0, 0, H);
-    bg.addColorStop(0,   '#0a0e22');
-    bg.addColorStop(0.5, '#05060d');
-    bg.addColorStop(1,   '#000003');
-    ctx.fillStyle = bg;
-    ctx.fillRect(0, 0, W, H);
+    // Background sweep
+    ctx.fillStyle = COLORS.bg;
+    ctx.fillRect(0, 0, W, H_VIEW);
 
-    // Side neon strips (casino trim)
-    const stripPulse = 0.7 + Math.sin(performance.now() / 700) * 0.15;
-    const strip = ctx.createLinearGradient(0, 0, 24, 0);
-    strip.addColorStop(0, 'rgba(255, 61, 240, ' + (0.55 * stripPulse) + ')');
-    strip.addColorStop(1, 'rgba(255, 61, 240, 0)');
-    ctx.fillStyle = strip; ctx.fillRect(0, 0, 24, H);
-    const stripR = ctx.createLinearGradient(W, 0, W - 24, 0);
-    stripR.addColorStop(0, 'rgba(41, 247, 255, ' + (0.55 * stripPulse) + ')');
-    stripR.addColorStop(1, 'rgba(41, 247, 255, 0)');
-    ctx.fillStyle = stripR; ctx.fillRect(W - 24, 0, 24, H);
+    // Blit visible slice of static prerender
+    const camY = Math.max(0, Math.min(WORLD_H - H_VIEW, Math.floor(cameraY)));
+    ctx.drawImage(
+      staticCanvas,
+      0, camY, W, H_VIEW,
+      0, 0, W, H_VIEW
+    );
 
-    // Perspective grid (tron floor)
-    const horizon = H * 0.42;
+    // World-coord draws
     ctx.save();
-    ctx.lineWidth = 1;
-    // horizontal lines — denser/brighter near bottom
-    for (let i = 0; i < 18; i++) {
-      const t = i / 17;
-      const y = horizon + Math.pow(t, 1.8) * (H - horizon);
-      ctx.strokeStyle = `rgba(41, 247, 255, ${0.05 + t * 0.32})`;
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
-    }
-    // vanishing vertical lines from horizon
-    const vp = W / 2;
-    for (let i = -12; i <= 12; i++) {
-      const xBottom = W / 2 + i * (W / 16);
-      ctx.strokeStyle = `rgba(255, 61, 240, ${0.04 + Math.abs(i) * 0.012})`;
-      ctx.beginPath();
-      ctx.moveTo(vp, horizon);
-      ctx.lineTo(xBottom, H);
-      ctx.stroke();
-    }
-    // horizon glow line
-    const horizGrad = ctx.createLinearGradient(0, horizon - 6, 0, horizon + 12);
-    horizGrad.addColorStop(0, 'rgba(41, 247, 255, 0)');
-    horizGrad.addColorStop(0.5, 'rgba(41, 247, 255, 0.55)');
-    horizGrad.addColorStop(1, 'rgba(41, 247, 255, 0)');
-    ctx.fillStyle = horizGrad;
-    ctx.fillRect(0, horizon - 6, W, 18);
-    ctx.restore();
+    ctx.translate(0, -camY);
 
-    if (!engine || !signs) return;
-    ctx.save();
-    applyCamera();
-
-    // Sign zones (drawn under everything)
-    drawSignZone(signs.yes, 'YES', '#5cff7a', signs.yesGlow, outcome === 'yes');
-    drawSignZone(signs.no,  'NO',  '#ff4d68', signs.noGlow,  outcome === 'no');
-
-    // sparks
-    ctx.globalCompositeOperation = 'lighter';
-    for (let i = sparks.length - 1; i >= 0; i--) {
-      const s = sparks[i];
-      s.x += s.vx; s.y += s.vy; s.vy += 0.15; s.life -= 0.04;
-      if (s.life <= 0) { sparks.splice(i, 1); continue; }
-      ctx.fillStyle = s.color;
-      ctx.globalAlpha = s.life;
-      ctx.shadowColor = s.color;
-      ctx.shadowBlur = 12;
-      ctx.beginPath(); ctx.arc(s.x, s.y, 2.2, 0, Math.PI * 2); ctx.fill();
+    // Kinematic obstacles (only those visible)
+    const yMin = camY - 40, yMax = camY + H_VIEW + 40;
+    for (const o of kinObs) {
+      if (o.cy < yMin || o.cy > yMax) continue;
+      drawKinematic(o);
     }
-    ctx.shadowBlur = 0; ctx.globalAlpha = 1;
-    ctx.globalCompositeOperation = 'source-over';
 
-    // pegs
-    if (modules.pegs) for (const p of modules.pegs) drawRect(p, '#29f7ff', 8);
-    // slopes
-    if (modules.slopes) for (const s of modules.slopes) drawRect(s, '#ff3df0', 6);
-    // ledge / seesaw
-    if (modules.ledge) drawRect(modules.ledge, '#ff3df0', 6);
-    if (modules.seesaw) drawRect(modules.seesaw, '#29f7ff', 10);
-    // dominoes
-    if (modules.dominoes) for (const d of modules.dominoes) drawRect(d, '#ff3df0', 8);
-    // hammer
-    if (modules.hammer) {
-      drawRect(modules.hammer, '#ff3df0', 10);
-      const p = modules.hammer.position;
-      // pivot point indicator
-      ctx.fillStyle = '#29f7ff'; ctx.shadowColor = '#29f7ff'; ctx.shadowBlur = 10;
-      ctx.beginPath();
-      // approximate pivot
-      const a = modules.hammer.angle;
-      ctx.arc(p.x - Math.sin(a) * 45, p.y - Math.cos(a) * 45, 3, 0, Math.PI * 2); ctx.fill();
-      ctx.shadowBlur = 0;
-    }
-    // frog — triangle body with eyes that follow rotation; flinch squishes briefly on hit
-    if (modules.frog) {
-      const f = modules.frog, p = f.position, a = f.angle;
-      const flinch = modules.frogFlinch || 0;
-      const sx = 1 + flinch * 12;
-      const sy = 1 - flinch * 14;
-      ctx.save();
-      ctx.translate(p.x, p.y); ctx.rotate(a); ctx.scale(sx, sy);
-      ctx.shadowColor = '#5cff7a'; ctx.shadowBlur = 18 + flinch * 30;
-      ctx.fillStyle = '#5cff7a';
-      ctx.beginPath();
-      ctx.moveTo(0, -22); ctx.lineTo(20, 16); ctx.lineTo(-20, 16); ctx.closePath();
-      ctx.fill();
-      ctx.fillStyle = '#fff';
-      ctx.beginPath(); ctx.arc(-6, -6, 3, 0, Math.PI * 2); ctx.arc(6, -6, 3, 0, Math.PI * 2); ctx.fill();
-      ctx.restore();
-      ctx.shadowBlur = 0;
-    }
-    // magnet bumper
-    if (modules.magnet) {
-      const p = modules.magnet.position;
-      const col = modules.magnetSign > 0 ? '#ff3df0' : '#29f7ff';
-      ctx.shadowColor = col; ctx.shadowBlur = 24;
-      ctx.strokeStyle = col; ctx.lineWidth = 3;
-      ctx.beginPath(); ctx.arc(p.x, p.y, 26, 0, Math.PI * 2); ctx.stroke();
-      // ring pulse
-      const pulse = (performance.now() / 200) % 1;
-      ctx.globalAlpha = 1 - pulse;
-      ctx.beginPath(); ctx.arc(p.x, p.y, 26 + pulse * 18, 0, Math.PI * 2); ctx.stroke();
+    // Particles
+    if (particles.length) {
+      ctx.globalCompositeOperation = 'lighter';
+      for (let i = 0; i < particles.length; i++) {
+        const p = particles[i];
+        if (p.y < yMin || p.y > yMax) continue;
+        ctx.globalAlpha = Math.min(1, p.life * 1.6);
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 2.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
       ctx.globalAlpha = 1;
-      ctx.shadowBlur = 0;
+      ctx.globalCompositeOperation = 'source-over';
     }
 
-    // worm
-    if (modules.worm) {
-      ctx.shadowColor = '#ff3df0'; ctx.shadowBlur = 14;
-      ctx.strokeStyle = '#ff3df0'; ctx.lineWidth = 5; ctx.lineCap = 'round';
+    // Trails
+    for (const b of balls) drawTrail(b);
+
+    // Balls
+    for (const b of balls) drawBall(b);
+
+    ctx.restore();
+  }
+
+  function drawKinematic(o) {
+    if (o.kind === 'arm') {
+      const ex = o.cx + Math.cos(o.angle) * o.length;
+      const ey = o.cy + Math.sin(o.angle) * o.length;
+      ctx.strokeStyle = o.color;
+      ctx.lineWidth = o.thick;
+      ctx.lineCap = 'round';
       ctx.beginPath();
-      modules.worm.forEach((s, i) => {
-        if (i === 0) ctx.moveTo(s.position.x, s.position.y);
-        else ctx.lineTo(s.position.x, s.position.y);
-      });
+      ctx.moveTo(o.cx, o.cy); ctx.lineTo(ex, ey);
       ctx.stroke();
-      for (const s of modules.worm) {
-        ctx.fillStyle = '#ff3df0';
-        ctx.beginPath(); ctx.arc(s.position.x, s.position.y, 5, 0, Math.PI * 2); ctx.fill();
-      }
-      ctx.shadowBlur = 0;
-    }
-
-    // Spider — 8 articulated legs splayed below the body, each with a knee bend.
-    // Calm idle wiggle; legs spasm when the ball is nearby (alert ramps in the loop).
-    if (modules.spider) {
-      const sp = modules.spider;
-      sp.phase += 0.05 + sp.alert * 0.16;
-      ctx.shadowColor = '#29f7ff'; ctx.shadowBlur = 14 + sp.alert * 16;
-      ctx.strokeStyle = '#29f7ff'; ctx.lineWidth = 2.2; ctx.lineCap = 'round';
-
-      const legCount = 8;
-      const upperLen = 11, lowerLen = 14;
-      for (let i = 0; i < legCount; i++) {
-        // Distribute base angles across the lower hemisphere (π/4 .. 3π/4).
-        // In canvas coords, π/4 = down-right, π/2 = straight down, 3π/4 = down-left.
-        const t = i / (legCount - 1);
-        const baseAng = Math.PI / 4 + t * (Math.PI / 2);
-        const isLeft = baseAng > Math.PI / 2;
-        // upper segment wiggles in idle, spasms on alert
-        const wiggle = Math.sin(sp.phase + i * 0.7) * (0.04 + sp.alert * 0.18);
-        const upperAng = baseAng + wiggle;
-        // knee bend kicks lower segment outward (further from body's vertical axis)
-        const bend = 0.55 + sp.alert * 0.5 + Math.sin(sp.phase * 1.4 + i) * 0.12;
-        const lowerAng = upperAng + (isLeft ? bend : -bend);
-        const kneeX = sp.x + Math.cos(upperAng) * upperLen;
-        const kneeY = sp.y + Math.sin(upperAng) * upperLen;
-        const footX = kneeX + Math.cos(lowerAng) * lowerLen;
-        const footY = kneeY + Math.sin(lowerAng) * lowerLen;
-        ctx.beginPath();
-        ctx.moveTo(sp.x, sp.y);
-        ctx.lineTo(kneeX, kneeY);
-        ctx.lineTo(footX, footY);
-        ctx.stroke();
-      }
-
-      // round body
-      ctx.fillStyle = '#29f7ff';
+      ctx.fillStyle = COLORS.bg;
+      ctx.beginPath(); ctx.arc(o.cx, o.cy, 5, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = COLORS.cyan; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(o.cx, o.cy, 5, 0, Math.PI * 2); ctx.stroke();
+    } else if (o.kind === 'gear') {
+      ctx.save();
+      ctx.translate(o.cx, o.cy);
+      ctx.rotate(o.angle);
+      ctx.strokeStyle = o.color;
+      ctx.fillStyle = 'rgba(2,3,10,0.6)';
+      ctx.lineWidth = 2;
+      // teeth
+      const r = o.r, rt = r + 6;
+      const n = o.teeth;
       ctx.beginPath();
-      ctx.arc(sp.x, sp.y, 7 + sp.alert * 1.4, 0, Math.PI * 2);
-      ctx.fill();
-      // tiny inset eyes
-      ctx.fillStyle = '#03040a';
-      ctx.beginPath();
-      ctx.arc(sp.x - 2.3, sp.y - 1.6, 1.2, 0, Math.PI * 2);
-      ctx.arc(sp.x + 2.3, sp.y - 1.6, 1.2, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.shadowBlur = 0;
-    }
-
-    // paddle
-    if (paddleBody) drawRect(paddleBody, '#29f7ff', 10);
-
-    // ball trail
-    ctx.globalCompositeOperation = 'lighter';
-    for (let i = 0; i < particles.length; i++) {
-      const p = particles[i];
-      p.life -= 0.025;
-      if (p.life <= 0) continue;
-      ctx.fillStyle = '#29f7ff';
-      ctx.globalAlpha = p.life * 0.5;
-      ctx.shadowColor = '#29f7ff'; ctx.shadowBlur = 12;
-      ctx.beginPath(); ctx.arc(p.x, p.y, 4 * p.life, 0, Math.PI * 2); ctx.fill();
-    }
-    ctx.shadowBlur = 0; ctx.globalAlpha = 1;
-    ctx.globalCompositeOperation = 'source-over';
-
-    // ball — cyan halo with white core
-    if (ball) {
-      const bx = ball.position.x, by = ball.position.y;
-      ctx.shadowColor = '#29f7ff'; ctx.shadowBlur = 40;
-      ctx.fillStyle = '#29f7ff';
-      ctx.beginPath(); ctx.arc(bx, by, 12, 0, Math.PI * 2); ctx.fill();
-      ctx.shadowBlur = 24;
-      ctx.fillStyle = '#bff9ff';
-      ctx.beginPath(); ctx.arc(bx, by, 8, 0, Math.PI * 2); ctx.fill();
-      ctx.shadowBlur = 0;
-      ctx.fillStyle = '#ffffff';
-      ctx.beginPath(); ctx.arc(bx - 2, by - 2, 4, 0, Math.PI * 2); ctx.fill();
-    }
-
-    // butterfly highlight ring — sustained for ~900ms after the step is first reached.
-    if (highlightStep >= 0 && mode === 'replaying' && highlightHitAt && ball) {
-      const age = performance.now() - highlightHitAt;
-      if (age < 900) {
-        const decay = 1 - (age / 900);
-        const pulse = 0.6 + Math.sin(performance.now() / 100) * 0.4;
-        ctx.globalAlpha = 0.5 + decay * 0.5;
-        ctx.strokeStyle = '#ffd84a';
-        ctx.shadowColor = '#ffd84a'; ctx.shadowBlur = 30;
-        ctx.lineWidth = 2 + decay * 2;
-        ctx.beginPath();
-        ctx.arc(ball.position.x, ball.position.y, 24 + pulse * 10 + (1 - decay) * 18, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.globalAlpha = 1;
-        ctx.shadowBlur = 0;
+      for (let i = 0; i < n; i++) {
+        const a0 = (i / n) * Math.PI * 2;
+        const a1 = ((i + 0.5) / n) * Math.PI * 2;
+        ctx.lineTo(Math.cos(a0) * r, Math.sin(a0) * r);
+        ctx.lineTo(Math.cos(a1) * rt, Math.sin(a1) * rt);
       }
-    }
-
-    ctx.restore();
-
-    // Dim wash behind the verdict (drawn over the canvas, under DOM overlays).
-    if (resultDim > 0) {
-      ctx.fillStyle = `rgba(2, 3, 10, ${resultDim})`;
-      ctx.fillRect(0, 0, W, H);
+      ctx.closePath();
+      ctx.fill(); ctx.stroke();
+      // hub
+      ctx.beginPath(); ctx.arc(0, 0, r * 0.32, 0, Math.PI * 2); ctx.stroke();
+      ctx.restore();
+    } else if (o.kind === 'hammer') {
+      const bx = o.cx + Math.cos(o.angle) * o.length;
+      const by = o.cy + Math.sin(o.angle) * o.length;
+      ctx.strokeStyle = o.color;
+      ctx.lineWidth = o.thick;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(o.cx, o.cy); ctx.lineTo(bx, by);
+      ctx.stroke();
+      ctx.fillStyle = o.color;
+      ctx.beginPath(); ctx.arc(bx, by, o.bobR, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = COLORS.bg;
+      ctx.beginPath(); ctx.arc(bx, by, o.bobR * 0.45, 0, Math.PI * 2); ctx.fill();
+      // pivot
+      ctx.fillStyle = COLORS.bg;
+      ctx.beginPath(); ctx.arc(o.cx, o.cy, 5, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = COLORS.cyan; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(o.cx, o.cy, 5, 0, Math.PI * 2); ctx.stroke();
     }
   }
 
-  function drawRect(body, color, blur = 8) {
+  function drawBall(b) {
+    if (!b.alive) return;
     ctx.save();
-    ctx.translate(body.position.x, body.position.y);
-    ctx.rotate(body.angle);
-    const v = body.vertices;
-    // compute width/height from vertices
-    let minX=1e9,minY=1e9,maxX=-1e9,maxY=-1e9;
-    for (const p of v) {
-      const dx = p.x - body.position.x, dy = p.y - body.position.y;
-      const lx = Math.cos(-body.angle)*dx - Math.sin(-body.angle)*dy;
-      const ly = Math.sin(-body.angle)*dx + Math.cos(-body.angle)*dy;
-      if (lx<minX)minX=lx; if (ly<minY)minY=ly;
-      if (lx>maxX)maxX=lx; if (ly>maxY)maxY=ly;
-    }
-    const w = maxX - minX, h = maxY - minY;
-    ctx.shadowColor = color; ctx.shadowBlur = blur;
-    ctx.strokeStyle = color; ctx.lineWidth = 2;
-    ctx.fillStyle = color + '22';
+    ctx.shadowColor = b.color;
+    ctx.shadowBlur = 22;
+    ctx.fillStyle = b.color;
     ctx.beginPath();
-    ctx.rect(-w/2, -h/2, w, h);
+    ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
     ctx.fill();
-    ctx.stroke();
-    ctx.restore();
     ctx.shadowBlur = 0;
+    // highlight
+    ctx.fillStyle = 'rgba(255,255,255,0.55)';
+    ctx.beginPath();
+    ctx.arc(b.x - b.r * 0.35, b.y - b.r * 0.35, b.r * 0.32, 0, Math.PI * 2);
+    ctx.fill();
+    // letter
+    ctx.fillStyle = COLORS.bg;
+    ctx.font = 'bold 12px "Courier New", monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(b.label === 'yes' ? 'Y' : 'N', b.x, b.y + 1);
+    ctx.restore();
   }
 
-  function drawSignZone(zone, label, color, glow, win) {
-    if (!zone) return;
-    // Visual sign is narrower than the sensor zone for cleaner look.
-    const p = zone.position;
-    const w = W * 0.34, h = 60;
-    const pulse = win ? (0.7 + Math.sin(performance.now() / 90) * 0.3) : 1;
+  function drawTrail(b) {
+    if (!b.alive || !b.trail || b.trail.length < 4) return;
     ctx.save();
-    ctx.translate(p.x, p.y);
-    // outer halo box
-    ctx.shadowColor = color;
-    ctx.shadowBlur = 20 + glow * 80 * pulse;
-    ctx.strokeStyle = color;
-    ctx.fillStyle = color + (win ? '44' : '0c');
-    ctx.lineWidth = 2 + glow * 4 * pulse;
-    ctx.beginPath();
-    roundRect(ctx, -w/2, -h/2, w, h, 10);
-    ctx.fill(); ctx.stroke();
-    // inner inset line
-    ctx.shadowBlur = 0;
-    ctx.globalAlpha = 0.55 + glow * 0.45;
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    roundRect(ctx, -w/2 + 6, -h/2 + 6, w - 12, h - 12, 6);
-    ctx.stroke();
-    ctx.globalAlpha = 1;
-    // label
-    ctx.shadowColor = color;
-    ctx.shadowBlur = 14 + glow * 30;
-    ctx.fillStyle = win ? '#ffffff' : color;
-    ctx.font = 'bold 42px Courier New';
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText(label, 0, 2);
-    // corner brackets
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 2;
-    const br = 12, bw = 14;
-    [[-1,-1],[1,-1],[-1,1],[1,1]].forEach(([sx, sy]) => {
-      const x = sx * (w/2 - br), y = sy * (h/2 - br);
+    ctx.globalCompositeOperation = 'lighter';
+    const n = b.trail.length / 2;
+    for (let i = 0; i < n; i++) {
+      const tx = b.trail[i * 2];
+      const ty = b.trail[i * 2 + 1];
+      const k = i / n;
+      ctx.globalAlpha = k * 0.45;
+      ctx.fillStyle = b.color;
       ctx.beginPath();
-      ctx.moveTo(x, y + sy * bw); ctx.lineTo(x, y);
-      ctx.lineTo(x + sx * bw, y); ctx.stroke();
-    });
-    ctx.restore();
-    ctx.shadowBlur = 0;
-  }
-
-  function roundRect(c, x, y, w, h, r) {
-    c.moveTo(x + r, y);
-    c.lineTo(x + w - r, y); c.quadraticCurveTo(x + w, y, x + w, y + r);
-    c.lineTo(x + w, y + h - r); c.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
-    c.lineTo(x + r, y + h); c.quadraticCurveTo(x, y + h, x, y + h - r);
-    c.lineTo(x, y + r); c.quadraticCurveTo(x, y, x + r, y);
-  }
-
-  // ───────────────────────────── URL state, share, mute
-  function parseUrlState() {
-    const u = new URL(window.location.href);
-    const seedRaw = u.searchParams.get('seed');
-    const qRaw = u.searchParams.get('q');
-    let seed = null;
-    if (seedRaw) {
-      const n = parseInt(seedRaw, 16);
-      if (Number.isFinite(n)) seed = n >>> 0;
+      ctx.arc(tx, ty, b.r * (0.4 + k * 0.5), 0, Math.PI * 2);
+      ctx.fill();
     }
-    return { seed, q: qRaw || '' };
+    ctx.restore();
+  }
+
+  // ───────────────────────────── HUD: lead indicator
+  function updateScoreboard() {
+    if (mode !== 'racing' && mode !== 'finishing') return;
+    let leadLabel;
+    if (winner) leadLabel = winner;
+    else {
+      const [a, b] = balls;
+      leadLabel = a.y >= b.y ? a.label : b.label;
+    }
+    scoreYes.classList.toggle('lead', leadLabel === 'yes');
+    scoreNo.classList.toggle('lead',  leadLabel === 'no');
+  }
+
+  // ───────────────────────────── Lifecycle
+  function spawnBalls() {
+    const startY = 70;
+    balls = [
+      {
+        label: 'yes', color: COLORS.cyan,
+        x: W * 0.40 + rrange(-6, 6), y: startY,
+        vx: rrange(-0.4, 0.4), vy: 0,
+        r: BALL_R, alive: true, finished: false,
+        trail: [], _cooldown: 0
+      },
+      {
+        label: 'no',  color: COLORS.magenta,
+        x: W * 0.60 + rrange(-6, 6), y: startY,
+        vx: rrange(-0.4, 0.4), vy: 0,
+        r: BALL_R, alive: true, finished: false,
+        trail: [], _cooldown: 0
+      }
+    ];
+  }
+
+  function startRace(seed) {
+    if (mode === 'racing' || mode === 'finishing') return;
+    ensureAudio();
+    if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+
+    buildCourse(seed);
+    prerenderStatic();
+    spawnBalls();
+    cameraY = 0; cameraTargetY = 0;
+    winner = null;
+    mode = 'racing';
+    raceStart = performance.now();
+    raceElapsed = 0;
+
+    const q = qInput.value.trim();
+    banner.textContent = q ? `“${q}”` : '';
+    menu.classList.add('hidden');
+    result.classList.add('hidden');
+    hud.classList.remove('hidden');
+    scoreYes.classList.remove('lead');
+    scoreNo.classList.remove('lead');
+
+    // tone-up
+    blip(440, 90, 'square', 0.08);
+    setTimeout(() => blip(660, 90, 'square', 0.08), 110);
+  }
+
+  function endRace(which) {
+    mode = 'done';
+    verdict.textContent = which.toUpperCase();
+    verdict.className = 'verdict ' + which;
+    const margin = (() => {
+      const a = balls[0], b = balls[1];
+      const dist = Math.abs(a.y - b.y);
+      return dist;
+    })();
+    const secs = (raceElapsed / 1000).toFixed(1);
+    resultMeta.textContent =
+      `${secs}s · WON BY ${Math.round(margin)} PX`;
+    result.classList.remove('hidden');
+    hud.classList.add('hidden');
+    writeUrlState();
+  }
+
+  // ───────────────────────────── URL state & share
+  function parseUrl() {
+    try {
+      const u = new URL(window.location.href);
+      const seedRaw = u.searchParams.get('seed');
+      const q = u.searchParams.get('q') || '';
+      const seed = seedRaw ? (parseInt(seedRaw, 16) >>> 0) : null;
+      return { seed, q };
+    } catch (e) { return { seed: null, q: '' }; }
   }
   function writeUrlState() {
     try {
@@ -1097,7 +907,7 @@
       const q = (qInput.value || '').trim();
       if (q) u.searchParams.set('q', q); else u.searchParams.delete('q');
       window.history.replaceState({}, '', u.toString());
-    } catch (e) { /* file:// has no URL */ }
+    } catch (e) {}
   }
   function shareUrl() {
     try {
@@ -1119,129 +929,111 @@
     }, 1700);
   }
 
-  // Mute toggle — persisted in localStorage so the preference sticks.
-  const MUTE_KEY = 'flipper.muted';
-  let muted = false;
-  try { muted = localStorage.getItem(MUTE_KEY) === '1'; } catch (e) {}
-  function applyMute() {
-    muteBtn.setAttribute('aria-pressed', muted ? 'true' : 'false');
-    muteBtn.setAttribute('aria-label', muted ? 'Unmute audio' : 'Mute audio');
-    const x  = muteBtn.querySelector('#muteX');
-    const wv = muteBtn.querySelector('#muteWv');
-    if (x)  x.style.display  = muted ? '' : 'none';
-    if (wv) wv.style.display = muted ? 'none' : '';
-    try {
-      if (window.Tone && window.Tone.getDestination) {
-        window.Tone.getDestination().mute = muted;
+  // ───────────────────────────── Main loop
+  // Fixed-timestep physics + variable-rate rendering so behavior is identical
+  // regardless of frame rate or rAF throttling.
+  const FIXED_DT_MS = 1000 / 60;          // physics tick = 1 simulated frame
+  const FIXED_DT    = 1;                  // dt passed to step() in frame units
+  const MAX_TICKS   = 16;                 // cap catch-up to avoid spirals
+  let physAccum = 0;
+  let lastT = performance.now();
+
+  function loop(now) {
+    let frameMs = now - lastT;
+    if (frameMs > 250) frameMs = 250;     // clamp huge gaps (tab return)
+    lastT = now;
+
+    if (mode === 'racing' || mode === 'finishing') {
+      physAccum += frameMs;
+      let ticks = 0;
+      while (physAccum >= FIXED_DT_MS && ticks < MAX_TICKS) {
+        const sub = FIXED_DT / SUBSTEPS;
+        for (let s = 0; s < SUBSTEPS; s++) step(sub);
+        physAccum -= FIXED_DT_MS;
+        ticks++;
+        raceElapsed += FIXED_DT_MS;
       }
-    } catch (e) {}
-  }
-  applyMute();
-  muteBtn.addEventListener('click', () => {
-    muted = !muted;
-    try { localStorage.setItem(MUTE_KEY, muted ? '1' : '0'); } catch (e) {}
-    applyMute();
-  });
+      if (ticks === MAX_TICKS) physAccum = 0;
+      updateCamera(frameMs / FIXED_DT_MS);
+      updateScoreboard();
 
-  // ───────────────────────────── Click / keyboard handlers
-  async function bestEffortAudio() {
-    try {
-      await Promise.race([
-        A.init(),
-        new Promise((_, rej) => setTimeout(() => rej(new Error('audio timeout')), 800))
-      ]);
-    } catch (e) { /* continue silent */ }
-    applyMute();
-  }
-
-  let flipInFlight = false;
-  flipBtn.addEventListener('click', async () => {
-    if (flipInFlight || mode === 'running' || mode === 'replaying') return;
-    flipInFlight = true;
-    flipBtn.disabled = true;
-    try {
-      await bestEffortAudio();
-      const fromUrl = pendingSeed;
-      pendingSeed = null;
-      const seed = (fromUrl != null) ? fromUrl : ((Math.random() * 0xffffffff) >>> 0);
-      startFlip(seed);
-    } finally {
-      flipBtn.disabled = false;
-      flipInFlight = false;
+      if (mode === 'finishing') {
+        finishDelay -= frameMs / 1000;
+        if (finishDelay <= 0) endRace(winner);
+      }
+    } else {
+      updateCamera(frameMs / FIXED_DT_MS);
     }
-  });
 
+    render();
+    scheduleNext(loop);
+  }
+
+  function scheduleNext(fn) {
+    // Hybrid: rAF when the tab is active, setTimeout(16) fallback when
+    // rAF is throttled (hidden tabs, iframe previews). First one wins.
+    let called = false;
+    const guard = (t) => { if (called) return; called = true; fn(t || performance.now()); };
+    const fb = setTimeout(() => guard(performance.now()), 24);
+    requestAnimationFrame((t) => { clearTimeout(fb); guard(t); });
+  }
+
+  // ───────────────────────────── UI wiring
+  flipBtn.addEventListener('click', () => {
+    if (mode === 'racing' || mode === 'finishing') return;
+    const seed = (pendingSeed != null) ? pendingSeed : ((Math.random() * 0xffffffff) >>> 0);
+    pendingSeed = null;
+    startRace(seed);
+  });
   qInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); flipBtn.click(); }
   });
-
   againBtn.addEventListener('click', () => {
-    result.classList.add('hidden');
-    menu.classList.remove('hidden');
-    banner.classList.add('hidden');
     mode = 'idle';
-    outcome = null;
-    signs = null;
-    if (engine) { World.clear(world, false); Engine.clear(engine); }
-    engine = null; world = null; ball = null; paddleBody = null;
-    particles = []; sparks = []; modules = {};
-    resultDim = 0;
+    winner = null;
+    balls = [];
+    particles = [];
+    result.classList.add('hidden');
+    hud.classList.add('hidden');
+    menu.classList.remove('hidden');
     qInput.focus();
   });
-
-  replayBtn.addEventListener('click', async () => {
-    if (mode === 'replaying' || currentSeed == null) return;
-    await bestEffortAudio();
-    mode = 'replaying';
-    slowmoFactor = 0.4;
-    result.classList.add('hidden');
-    banner.classList.toggle('hidden', !banner.textContent);
-    outcome = null;
-    signs = null;
-    highlightHitAt = 0;
-    resultDim = 0;
-    build(currentSeed);
-    attachCollisionHandlers();
-    camera.x = W/2; camera.y = H/2;
-    camera.targetX = W/2; camera.targetY = H/2;
-    camera.zoom = 1; camera.targetZoom = 1;
-    runStartTime = performance.now();
-  });
-
   shareBtn.addEventListener('click', async () => {
     const url = shareUrl();
     try {
       await navigator.clipboard.writeText(url);
       showToast('Link copied');
     } catch (e) {
-      // Fallback: open a tiny prompt
       window.prompt('Copy this link', url);
     }
   });
-
-  // Global keyboard: Space/F to flip from the menu or after a result.
+  muteBtn.addEventListener('click', () => {
+    muted = !muted;
+    try { localStorage.setItem('flipper.muted', muted ? '1' : '0'); } catch (e) {}
+    applyMuteUI();
+  });
   window.addEventListener('keydown', (e) => {
     const inField = e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA');
     if (inField) return;
     if (e.key === ' ' || e.key === 'f' || e.key === 'F') {
       e.preventDefault();
-      if (mode === 'idle') flipBtn.click();
-      else if (mode === 'done') { againBtn.click(); setTimeout(() => flipBtn.click(), 60); }
-    } else if (e.key === 'r' || e.key === 'R') {
-      if (mode === 'done') replayBtn.click();
+      if (mode === 'idle')      flipBtn.click();
+      else if (mode === 'done') { againBtn.click(); setTimeout(() => flipBtn.click(), 50); }
     } else if (e.key === 'm' || e.key === 'M') {
       muteBtn.click();
     }
   });
 
-  // ───────────────────────────── Seed-from-URL bootstrap
-  let pendingSeed = null;
+  // ───────────────────────────── Boot
   (() => {
-    const { seed, q } = parseUrlState();
+    const { seed, q } = parseUrl();
     if (q && !qInput.value) qInput.value = q;
     if (seed != null) pendingSeed = seed;
+    // Bake an idle backdrop so the menu has something nice behind it
+    buildCourse((Math.random() * 0xffffffff) >>> 0);
+    prerenderStatic();
+    cameraY = 0;
+    lastT = performance.now();
+    scheduleNext(loop);
   })();
-
-  lastT = performance.now();
-  scheduleNext(loop);
 })();
