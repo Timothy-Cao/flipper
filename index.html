@@ -2,39 +2,73 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<meta name="description" content="A neon Rube-Goldberg yes/no oracle powered by live physics. Ask the universe, hit FLIP, watch the machine decide." />
+<meta name="theme-color" content="#03040a" />
+<meta name="color-scheme" content="dark" />
+
+<meta property="og:title" content="FLIPPER — neon yes/no oracle" />
+<meta property="og:description" content="Ask the universe a yes/no question. A short Rube-Goldberg machine plays out under live physics and decides." />
+<meta property="og:type" content="website" />
+<meta name="twitter:card" content="summary_large_image" />
+
 <title>FLIPPER</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg" />
 <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <main id="stage">
-    <canvas id="world" width="700" height="980"></canvas>
+    <canvas id="world" width="700" height="980" role="img" aria-label="Animated neon Rube-Goldberg yes or no machine"></canvas>
+
+    <!-- Persistent top-right utility bar -->
+    <div id="util" class="util">
+      <button id="mute" class="icon-btn" type="button" aria-label="Mute audio" aria-pressed="false" title="Mute (M)">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+          <path id="muteOn"  d="M4 9v6h4l5 4V5L8 9H4z" fill="currentColor"/>
+          <path id="muteWv"  d="M16 8.5a4.5 4.5 0 0 1 0 7M19 6a8 8 0 0 1 0 12" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round"/>
+          <path id="muteX"   d="M16.5 9.5l5 5M21.5 9.5l-5 5" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" style="display:none"/>
+        </svg>
+      </button>
+    </div>
 
     <!-- Menu (visible before flipping) -->
-    <section id="menu" class="overlay">
-      <h1 class="neon">FLIPPER</h1>
+    <section id="menu" class="overlay" aria-labelledby="title">
+      <h1 id="title" class="neon">FLIPPER</h1>
       <p class="sub">Ask the universe.</p>
-      <input id="question" type="text" placeholder="optional question…" maxlength="80" autocomplete="off" />
-      <button id="flip" class="big-btn">FLIP</button>
-      <p class="hint">It's never rigged. Every step rolls the dice.</p>
+      <label class="sr-only" for="question">A yes or no question</label>
+      <input id="question" type="text" placeholder="Ask a yes / no question…" maxlength="80" autocomplete="off" autocapitalize="sentences" spellcheck="false" enterkeyhint="go" />
+      <button id="flip" class="big-btn" type="button">FLIP</button>
+      <p class="hint">It's never rigged. Every step rolls the dice. <kbd>Space</kbd> to flip.</p>
     </section>
 
     <!-- Question banner during run -->
-    <div id="banner" class="hidden"></div>
+    <div id="banner" class="hidden" aria-live="polite"></div>
 
     <!-- Result screen -->
-    <section id="result" class="overlay hidden">
-      <div id="verdict" class="verdict"></div>
+    <section id="result" class="overlay hidden" aria-live="polite" aria-label="Flip result">
+      <div id="verdict" class="verdict" aria-live="assertive"></div>
       <div class="row">
-        <button id="again" class="btn">Flip again</button>
-        <button id="replay" class="btn">Replay in slow-mo</button>
+        <button id="again" class="btn" type="button">Flip again</button>
+        <button id="replay" class="btn" type="button">Replay in slow-mo</button>
+        <button id="share" class="btn" type="button" title="Copy a sharable link to this flip">Share</button>
       </div>
-      <p id="butterfly" class="hint"></p>
+      <p id="butterfly" class="hint butterfly"></p>
     </section>
+
+    <p id="fatal" class="fatal hidden" role="alert"></p>
+    <p id="toast" class="toast hidden" role="status" aria-live="polite"></p>
   </main>
 
-  <script src="https://cdn.jsdelivr.net/npm/matter-js@0.19.0/build/matter.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js"></script>
+  <script
+    src="https://cdn.jsdelivr.net/npm/matter-js@0.19.0/build/matter.min.js"
+    integrity="sha384-OqQP3UcU7efkEYDRjGmQou2uEvzGFGRtwdYXTjnupeB9cWogSgQ4BOhyklFBYbBR"
+    crossorigin="anonymous"
+    referrerpolicy="no-referrer"></script>
+  <script
+    src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js"
+    integrity="sha384-c6Uo4N9c3SOEigMVzP6IshUG1wQ5uMp3xeoQFiHWAQ86joWdgyajkvopySyKy/Z6"
+    crossorigin="anonymous"
+    referrerpolicy="no-referrer"></script>
   <script src="app.js"></script>
 </body>
 </html>

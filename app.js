@@ -4,8 +4,6 @@
  */
 
 (() => {
-  const { Engine, World, Bodies, Body, Composite, Constraint, Events, Vector } = Matter;
-
   // ───────────────────────────── DOM
   const canvas   = document.getElementById('world');
   const ctx      = canvas.getContext('2d');
@@ -18,8 +16,36 @@
   const againBtn = document.getElementById('again');
   const replayBtn= document.getElementById('replay');
   const qInput   = document.getElementById('question');
+  const fatal    = document.getElementById('fatal');
+  const muteBtn  = document.getElementById('mute');
+  const shareBtn = document.getElementById('share');
+  const toast    = document.getElementById('toast');
+
+  if (!window.Matter) {
+    if (fatal) {
+      fatal.textContent = 'FLIPPER needs Matter.js to run. Check your connection and refresh.';
+      fatal.classList.remove('hidden');
+    }
+    menu?.classList.add('hidden');
+    return;
+  }
+
+  const { Engine, World, Bodies, Body, Composite, Constraint, Events } = window.Matter;
+  const ToneLib = window.Tone;
 
   const W = canvas.width, H = canvas.height;
+  function syncCanvasScale() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const targetW = Math.round(W * dpr);
+    const targetH = Math.round(H * dpr);
+    if (canvas.width !== targetW || canvas.height !== targetH) {
+      canvas.width = targetW;
+      canvas.height = targetH;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+  }
+  syncCanvasScale();
+  window.addEventListener('resize', syncCanvasScale);
 
   // ───────────────────────────── RNG (Mulberry32) — seeded for replay
   function mulberry32(seed) {
@@ -42,35 +68,36 @@
     yes: null, no: null, hum: null,
     async init() {
       if (this.ready) return;
-      await Tone.start();
-      this.metal = new Tone.MetalSynth({
+      if (!ToneLib) return;
+      await ToneLib.start();
+      this.metal = new ToneLib.MetalSynth({
         frequency: 240, envelope: { attack: 0.001, decay: 0.18, release: 0.1 },
         harmonicity: 4.1, modulationIndex: 18, resonance: 3500, octaves: 1.2,
         volume: -18
       }).toDestination();
-      this.soft = new Tone.MembraneSynth({
+      this.soft = new ToneLib.MembraneSynth({
         pitchDecay: 0.04, octaves: 4, envelope: { attack: 0.001, decay: 0.2, sustain: 0 },
         volume: -16
       }).toDestination();
-      this.magnet = new Tone.FMSynth({
+      this.magnet = new ToneLib.FMSynth({
         harmonicity: 2.6, modulationIndex: 6,
         envelope: { attack: 0.002, decay: 0.25, sustain: 0, release: 0.2 },
         volume: -20
       }).toDestination();
-      this.lead = new Tone.Synth({
+      this.lead = new ToneLib.Synth({
         oscillator: { type: 'sawtooth' },
         envelope: { attack: 0.01, decay: 0.2, sustain: 0.1, release: 0.4 },
         volume: -14
       }).toDestination();
       // ambient hum
-      this.hum = new Tone.Oscillator(55, 'sine').toDestination();
+      this.hum = new ToneLib.Oscillator(55, 'sine').toDestination();
       this.hum.volume.value = -34;
       this.hum.start();
       this.ready = true;
     },
     blip(kind, v = 1) {
       if (!this.ready) return;
-      const t = Tone.now();
+      const t = ToneLib.now();
       v = Math.min(1, Math.max(0.05, v));
       try {
         if (kind === 'metal') this.metal.triggerAttackRelease('C2', '16n', t, v * 0.6);
@@ -82,28 +109,30 @@
     arpeggio(up) {
       if (!this.ready) return;
       const notes = up ? ['C4', 'E4', 'G4', 'C5', 'E5'] : ['E5', 'C5', 'G4', 'E4', 'C4'];
-      const t = Tone.now();
+      const t = ToneLib.now();
       notes.forEach((n, i) => this.lead.triggerAttackRelease(n, '8n', t + i * 0.09, 0.8));
     }
   };
 
   // ───────────────────────────── World
-  let engine, world, ball, signs, paddleHinge, paddleBody;
+  let engine, world, ball, signs, paddleBody;
   let particles = [];        // ball trail
   let sparks = [];           // collision sparks
-  let creatureFX = [];       // canned animations on creature hits
   let modules = {};          // references to module bodies for drawing
-  let staticDraw = [];       // (extra draw hints)
-  let camera = { x: W/2, y: H/2, zoom: 1, targetX: W/2, targetY: H/2, targetZoom: 1, slowmo: 1 };
-  let runEvents = [];        // recorded events for replay/butterfly
+  let camera = { x: W/2, y: H/2, zoom: 1, targetX: W/2, targetY: H/2, targetZoom: 1 };
   let runStartTime = 0;
   let currentSeed = 0;
   let outcome = null;        // 'yes' | 'no'
   let mode = 'idle';         // 'idle' | 'running' | 'done' | 'replaying'
-  let slowmoFactor = 1;      // for replay
+  let slowmoFactor = 1;      // engine time scale
   let highlightStep = -1;    // butterfly step to highlight
-  let stepLabels = ['flick', 'plinko', 'seesaw', 'module', 'final'];
+  let highlightHitAt = 0;    // when, in replay, the butterfly step was first reached
+  let resultDim = 0;         // 0..1 — alpha of the dim wash behind the verdict
+  const stepLabels = ['flick', 'plinko', 'seesaw', 'module', 'final'];
   let currentStepIndex = 0;
+  const reducedMotion =
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   // ───────────────────────────── Build scene
   function clearWorld() {
@@ -111,8 +140,7 @@
     engine = Engine.create();
     world = engine.world;
     engine.gravity.y = 1.2;
-    particles = []; sparks = []; creatureFX = []; modules = {}; staticDraw = [];
-    runEvents = [];
+    particles = []; sparks = []; modules = {};
     currentStepIndex = 0;
   }
 
@@ -254,7 +282,7 @@
     } else { // magnet
       const px = W/2 + rrange(-60, 60);
       const bumper = Bodies.circle(px, modY, 26, {
-        isStatic: true, restitution: 1.2, label: 'magnet'
+        isStatic: true, restitution: 1.0, label: 'magnet'
       });
       World.add(world, bumper);
       modules.magnet = bumper;
@@ -273,10 +301,16 @@
     World.add(world, [slopeL, slopeR]);
     modules.slopes = [slopeL, slopeR];
 
-    // Spider (decorative creature) in middle of funnel
+    // Spider (decorative creature) tucked above the YES/NO signs.
+    // Articulated legs animated in the loop; `alert` ramps up when the ball is close.
     const spiderX = W/2 + rrange(-20, 20);
     const spiderY = 820;
-    modules.spider = { x: spiderX, y: spiderY, twitch: 0, phase: rand() * Math.PI * 2 };
+    modules.spider = {
+      x: spiderX,
+      y: spiderY,
+      phase: rand() * Math.PI * 2,
+      alert: 0
+    };
 
     // Paddle that the ball strikes — it tips and tells us yes/no
     const paddleY = 850;
@@ -309,23 +343,26 @@
     });
     World.add(world, ground);
 
-    // Initial worm flick — direction biased toward center but jittered enough to favor either side
+    // Initial worm flick — direction biased toward center but jittered enough to favor either side.
+    // Animated as a wind-up: the worm visibly pulls back, then snaps forward into the ball.
     const flickPower = rrange(0.013, 0.022);
-    const flickAngle = rrange(-0.35, 0.35);          // wider angular jitter
+    const flickAngle = rrange(-0.35, 0.35);
     const flickSign = -startSide;                     // toward the opposite side
     modules.flick = { power: flickPower, angle: flickAngle, sign: flickSign, startSide };
-    setTimeout(() => {
-      if (mode !== 'running' && mode !== 'replaying') return;
-      const head = wormSegments[wormSegments.length - 1];
-      Body.applyForce(ball, ball.position, {
-        x: flickSign * Math.cos(flickAngle) * flickPower,
-        y: Math.abs(Math.sin(flickAngle)) * flickPower * 0.3 + 0.005
-      });
-      Body.applyForce(head, head.position, { x: startSide * 0.002, y: -0.004 });
-      A.blip('soft', 0.8);
-      runEvents.push({ t: performance.now() - runStartTime, kind: 'flick', step: 0 });
-      currentStepIndex = 1;
-    }, 600 / slowmoFactor);
+
+    // Cache of wind-affected bodies so the gust loop doesn't traverse all bodies.
+    modules.windTargets = Composite.allBodies(world).filter(
+      b => !b.isStatic && b.mass < 0.05 && b.label !== 'ball'
+    );
+
+    modules.windUp = {
+      t: 0,
+      pullUntil: 320,    // ms of "pull back" before release
+      fireAt: 620,       // ms when the impulse actually fires
+      fired: false,
+      sign: startSide,
+      flickSign
+    };
   }
 
   // ───────────────────────────── Collision handling
@@ -333,15 +370,15 @@
     Events.on(engine, 'collisionStart', (ev) => {
       for (const p of ev.pairs) {
         const a = p.bodyA, b = p.bodyB;
-        const labels = [a.label, b.label];
         const other = a.label === 'ball' ? b : (b.label === 'ball' ? a : null);
         if (!other) continue;
         const v = Math.min(20, Math.hypot(ball.velocity.x, ball.velocity.y));
         const intensity = Math.min(1, v / 12);
         // sparks
+        const sp = p.collision.supports[0] || ball.position;
         for (let i = 0; i < 4 + Math.floor(intensity * 6); i++) {
           sparks.push({
-            x: p.collision.supports[0].x, y: p.collision.supports[0].y,
+            x: sp.x, y: sp.y,
             vx: rrange(-3, 3), vy: rrange(-3, 3),
             life: 1, color: choice(['#29f7ff', '#ff3df0'])
           });
@@ -357,21 +394,18 @@
           if (currentStepIndex < 4) currentStepIndex = 4;
         } else if (other.label === 'domino' || other.label === 'hammer' || other.label === 'frog') {
           A.blip('metal', intensity * 0.7);
-          if (other.label === 'frog') creatureFX.push({ kind: 'frog', t: 0, body: other });
+          if (other.label === 'frog' && modules.frog) {
+            modules.frogFlinch = 0.001;            // small flinch pulse, decays in loop
+          }
           if (currentStepIndex < 4) currentStepIndex = 4;
         } else if (other.label === 'paddle') {
           A.blip('metal', intensity * 1.2);
           if (currentStepIndex < 5) currentStepIndex = 5;
+          // brief zoom pulse on the climactic strike
+          camera.targetZoom = Math.max(camera.targetZoom, 1.12);
         } else if (other.label === 'worm') {
           A.blip('soft', intensity * 0.5);
         }
-        runEvents.push({
-          t: performance.now() - runStartTime,
-          kind: 'hit-' + other.label,
-          step: currentStepIndex,
-          vx: ball.velocity.x, vy: ball.velocity.y,
-          x: ball.position.x, y: ball.position.y
-        });
 
         // Outcome detection
         if (other.label === 'yes' && !signs.decided) {
@@ -390,21 +424,26 @@
     if (mode === 'running' || mode === 'replaying') return;
     mode = 'running';
     slowmoFactor = 1;
-    outcome = null; highlightStep = -1;
+    outcome = null;
+    highlightStep = -1;
+    highlightHitAt = 0;
+    resultDim = 0;
+    currentSeed = seed >>> 0;
     menu.classList.add('hidden');
     result.classList.add('hidden');
     butterfly.textContent = '';
+    butterfly.classList.remove('butterfly-armed');
     const q = qInput.value.trim();
     banner.textContent = q ? `“${q}”` : '';
     banner.classList.toggle('hidden', !q);
-    build(seed);
+    build(currentSeed);
     attachCollisionHandlers();
     camera.x = W/2; camera.y = H/2;
     camera.targetX = W/2; camera.targetY = H/2;
     camera.zoom = 1; camera.targetZoom = 1;
     stuckFrames = 0; lastBallY = ball.position.y;
     runStartTime = performance.now();
-    // Safety timeout: if nothing decides within 12s, force decision by ball x
+    // Safety timeout: if nothing decides within 9s, force decision by ball x
     setTimeout(() => {
       if (!signs?.decided && (mode === 'running' || mode === 'replaying')) {
         finishRun(ball.position.x < W/2 ? 'yes' : 'no');
@@ -416,10 +455,11 @@
     if (outcome) return;
     outcome = which;
     signs.decided = which;
-    // climactic slow-mo + zoom
-    camera.targetZoom = 1.6;
-    slowmoFactor = 0.35;
+    // climactic slow-mo + zoom (skipped under reduced-motion)
+    camera.targetZoom = reducedMotion ? 1 : 1.6;
+    slowmoFactor = reducedMotion ? 1 : 0.3;
     A.arpeggio(which === 'yes');
+    const dwell = reducedMotion ? 150 : 1300;
     setTimeout(() => {
       mode = 'done';
       slowmoFactor = 1;
@@ -427,6 +467,7 @@
       verdict.textContent = which.toUpperCase();
       verdict.className = 'verdict ' + which;
       result.classList.remove('hidden');
+      writeUrlState();
       // compute butterfly point asynchronously
       computeButterfly(currentSeed, which).then(step => {
         if (step >= 0 && stepLabels[step]) {
@@ -438,7 +479,7 @@
           highlightStep = -1;
         }
       });
-    }, 1500);
+    }, dwell);
   }
 
   // ───────────────────────────── Butterfly point estimator
@@ -472,7 +513,7 @@
       const origRand = rand;
       // snapshot real-run globals
       const realEngine = engine, realWorld = world, realBall = ball,
-            realSigns = signs, realModules = modules, realRunEvents = runEvents,
+            realSigns = signs, realModules = modules,
             realStep = currentStepIndex, realSeed = currentSeed,
             realPaddle = paddleBody;
       try {
@@ -540,14 +581,14 @@
         Engine.clear(engine);
         // restore real-run globals
         engine = realEngine; world = realWorld; ball = realBall;
-        signs = realSigns; modules = realModules; runEvents = realRunEvents;
+        signs = realSigns; modules = realModules;
         currentStepIndex = realStep; currentSeed = realSeed;
         paddleBody = realPaddle;
         rand = origRand;
         resolve(done);
       } catch (e) {
         engine = realEngine; world = realWorld; ball = realBall;
-        signs = realSigns; modules = realModules; runEvents = realRunEvents;
+        signs = realSigns; modules = realModules;
         currentStepIndex = realStep; currentSeed = realSeed;
         paddleBody = realPaddle;
         rand = origRand;
@@ -565,26 +606,52 @@
     lastT = t;
 
     if (mode === 'running' || mode === 'replaying') {
+      // Worm wind-up: visibly pull head back, then fire impulse into the ball.
+      if (modules.windUp && !modules.windUp.fired && modules.worm) {
+        const wu = modules.windUp;
+        wu.t += dt * slowmoFactor;
+        const head = modules.worm[modules.worm.length - 1];
+        if (wu.t < wu.pullUntil) {
+          // pull the worm head AWAY from the ball (back toward its anchor side)
+          Body.applyForce(head, head.position, {
+            x: wu.sign * 0.0018,
+            y: -0.0006
+          });
+        }
+        if (wu.t >= wu.fireAt) {
+          wu.fired = true;
+          const f = modules.flick;
+          Body.applyForce(ball, ball.position, {
+            x: f.sign * Math.cos(f.angle) * f.power,
+            y: Math.abs(Math.sin(f.angle)) * f.power * 0.3 + 0.005
+          });
+          // worm recoil — head snaps forward then bounces back
+          Body.applyForce(head, head.position, { x: -wu.sign * 0.0035, y: -0.004 });
+          A.blip('soft', 0.8);
+          if (currentStepIndex < 1) currentStepIndex = 1;
+        }
+      }
+
       // magnet pull on live engine
       if (modules.kind === 'magnet' && modules.magnet && ball) {
         const dx = modules.magnet.position.x - ball.position.x;
         const dy = modules.magnet.position.y - ball.position.y;
         const d2 = dx*dx + dy*dy;
         if (d2 < 200*200 && d2 > 1) {
-          const f = modules.magnetStrength * modules.magnetSign / Math.sqrt(d2);
-          Body.applyForce(ball, ball.position, { x: dx * f, y: dy * f });
+          const fmag = modules.magnetStrength * modules.magnetSign / Math.sqrt(d2);
+          Body.applyForce(ball, ball.position, { x: dx * fmag, y: dy * fmag });
         }
       }
-      // occasional wind gust on light bodies
-      if (rand() < 0.01) {
+
+      // occasional wind gust on light bodies — cached list, not full traversal.
+      if (rand() < 0.01 && modules.windTargets) {
         const wind = (rand() - 0.5) * 0.0008;
-        World.allBodies(world).forEach(b => {
-          if (!b.isStatic && b.mass < 0.05) {
-            Body.applyForce(b, b.position, { x: wind, y: 0 });
-          }
-        });
+        for (const b of modules.windTargets) {
+          Body.applyForce(b, b.position, { x: wind, y: 0 });
+        }
       }
-      // frog occasional hop
+
+      // frog occasional hop + flinch decay
       if (modules.kind === 'frog' && modules.frog) {
         modules.frogTimer -= dt / 1000;
         if (modules.frogTimer <= 0) {
@@ -594,7 +661,21 @@
           });
           modules.frogTimer = rrange(0.6, 1.6);
         }
+        if (modules.frogFlinch > 0) {
+          modules.frogFlinch = Math.max(0, modules.frogFlinch - dt * 0.0035);
+        }
       }
+
+      // Spider proximity twitch — accelerate leg phase + offset when ball is close.
+      if (modules.spider && ball) {
+        const sp = modules.spider;
+        const ddx = sp.x - ball.position.x;
+        const ddy = sp.y - ball.position.y;
+        const dist = Math.hypot(ddx, ddy);
+        sp.alert = Math.max(0, sp.alert - dt * 0.003);
+        if (dist < 90) sp.alert = Math.min(1, sp.alert + 0.08);
+      }
+
       Engine.update(engine, dt * slowmoFactor);
 
       // ball trail particle
@@ -604,9 +685,10 @@
       }
 
       // Anti-stuck: if the ball isn't making downward progress, nudge it.
-      if (ball) {
-        const dy = ball.position.y - lastBallY;
-        if (dy < 0.5) {
+      // Only kicks in after the wind-up so the ball isn't yanked off the worm.
+      if (ball && (!modules.windUp || modules.windUp.fired)) {
+        const ddy = ball.position.y - lastBallY;
+        if (ddy < 0.5) {
           stuckFrames++;
           if (stuckFrames > 40) {
             Body.applyForce(ball, ball.position, {
@@ -620,11 +702,24 @@
         lastBallY = ball.position.y;
       }
 
+      // Butterfly tracking during replay — stamp the moment we first reach the step.
+      if (mode === 'replaying' && highlightStep >= 0 && highlightHitAt === 0 &&
+          currentStepIndex >= highlightStep + 1) {
+        highlightHitAt = performance.now();
+      }
+
       // camera follow — gentle bias toward the ball's vertical position
       if (ball) {
         camera.targetX = W/2 + (ball.position.x - W/2) * 0.25;
         camera.targetY = Math.max(H * 0.45, Math.min(H * 0.62, ball.position.y * 0.55 + H * 0.28));
       }
+    }
+
+    // Result dim — fades up after outcome is set; sits behind the verdict text.
+    if (outcome && mode !== 'replaying') {
+      resultDim = Math.min(0.55, resultDim + 0.02);
+    } else {
+      resultDim = Math.max(0, resultDim - 0.04);
     }
 
     // camera smoothing
@@ -633,8 +728,8 @@
     camera.zoom += (camera.targetZoom - camera.zoom) * 0.04;
 
     // sign glow pulse on outcome
-    if (outcome === 'yes') signs.yesGlow = Math.min(1, signs.yesGlow + 0.04);
-    if (outcome === 'no')  signs.noGlow  = Math.min(1, signs.noGlow + 0.04);
+    if (signs && outcome === 'yes') signs.yesGlow = Math.min(1, signs.yesGlow + 0.04);
+    if (signs && outcome === 'no')  signs.noGlow  = Math.min(1, signs.noGlow + 0.04);
 
     render();
     scheduleNext(loop);
@@ -704,7 +799,7 @@
     ctx.fillRect(0, horizon - 6, W, 18);
     ctx.restore();
 
-    if (!engine) return;
+    if (!engine || !signs) return;
     ctx.save();
     applyCamera();
 
@@ -748,17 +843,19 @@
       ctx.arc(p.x - Math.sin(a) * 45, p.y - Math.cos(a) * 45, 3, 0, Math.PI * 2); ctx.fill();
       ctx.shadowBlur = 0;
     }
-    // frog
+    // frog — triangle body with eyes that follow rotation; flinch squishes briefly on hit
     if (modules.frog) {
       const f = modules.frog, p = f.position, a = f.angle;
+      const flinch = modules.frogFlinch || 0;
+      const sx = 1 + flinch * 12;
+      const sy = 1 - flinch * 14;
       ctx.save();
-      ctx.translate(p.x, p.y); ctx.rotate(a);
-      ctx.shadowColor = '#5cff7a'; ctx.shadowBlur = 18;
+      ctx.translate(p.x, p.y); ctx.rotate(a); ctx.scale(sx, sy);
+      ctx.shadowColor = '#5cff7a'; ctx.shadowBlur = 18 + flinch * 30;
       ctx.fillStyle = '#5cff7a';
       ctx.beginPath();
       ctx.moveTo(0, -22); ctx.lineTo(20, 16); ctx.lineTo(-20, 16); ctx.closePath();
       ctx.fill();
-      // eyes
       ctx.fillStyle = '#fff';
       ctx.beginPath(); ctx.arc(-6, -6, 3, 0, Math.PI * 2); ctx.arc(6, -6, 3, 0, Math.PI * 2); ctx.fill();
       ctx.restore();
@@ -796,22 +893,50 @@
       ctx.shadowBlur = 0;
     }
 
-    // spider (decorative)
+    // Spider — 8 articulated legs splayed below the body, each with a knee bend.
+    // Calm idle wiggle; legs spasm when the ball is nearby (alert ramps in the loop).
     if (modules.spider) {
       const sp = modules.spider;
-      sp.phase += 0.06;
-      const tw = Math.sin(sp.phase) * 4;
-      ctx.shadowColor = '#29f7ff'; ctx.shadowBlur = 12;
-      ctx.strokeStyle = '#29f7ff'; ctx.lineWidth = 2;
-      for (let i = 0; i < 4; i++) {
-        const ang = (i / 4) * Math.PI * 2 + sp.phase * 0.2;
+      sp.phase += 0.05 + sp.alert * 0.16;
+      ctx.shadowColor = '#29f7ff'; ctx.shadowBlur = 14 + sp.alert * 16;
+      ctx.strokeStyle = '#29f7ff'; ctx.lineWidth = 2.2; ctx.lineCap = 'round';
+
+      const legCount = 8;
+      const upperLen = 11, lowerLen = 14;
+      for (let i = 0; i < legCount; i++) {
+        // Distribute base angles across the lower hemisphere (π/4 .. 3π/4).
+        // In canvas coords, π/4 = down-right, π/2 = straight down, 3π/4 = down-left.
+        const t = i / (legCount - 1);
+        const baseAng = Math.PI / 4 + t * (Math.PI / 2);
+        const isLeft = baseAng > Math.PI / 2;
+        // upper segment wiggles in idle, spasms on alert
+        const wiggle = Math.sin(sp.phase + i * 0.7) * (0.04 + sp.alert * 0.18);
+        const upperAng = baseAng + wiggle;
+        // knee bend kicks lower segment outward (further from body's vertical axis)
+        const bend = 0.55 + sp.alert * 0.5 + Math.sin(sp.phase * 1.4 + i) * 0.12;
+        const lowerAng = upperAng + (isLeft ? bend : -bend);
+        const kneeX = sp.x + Math.cos(upperAng) * upperLen;
+        const kneeY = sp.y + Math.sin(upperAng) * upperLen;
+        const footX = kneeX + Math.cos(lowerAng) * lowerLen;
+        const footY = kneeY + Math.sin(lowerAng) * lowerLen;
         ctx.beginPath();
         ctx.moveTo(sp.x, sp.y);
-        ctx.lineTo(sp.x + Math.cos(ang) * (14 + tw), sp.y + Math.sin(ang) * (14 + tw));
+        ctx.lineTo(kneeX, kneeY);
+        ctx.lineTo(footX, footY);
         ctx.stroke();
       }
+
+      // round body
       ctx.fillStyle = '#29f7ff';
-      ctx.beginPath(); ctx.arc(sp.x, sp.y, 5, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath();
+      ctx.arc(sp.x, sp.y, 7 + sp.alert * 1.4, 0, Math.PI * 2);
+      ctx.fill();
+      // tiny inset eyes
+      ctx.fillStyle = '#03040a';
+      ctx.beginPath();
+      ctx.arc(sp.x - 2.3, sp.y - 1.6, 1.2, 0, Math.PI * 2);
+      ctx.arc(sp.x + 2.3, sp.y - 1.6, 1.2, 0, Math.PI * 2);
+      ctx.fill();
       ctx.shadowBlur = 0;
     }
 
@@ -846,17 +971,31 @@
       ctx.beginPath(); ctx.arc(bx - 2, by - 2, 4, 0, Math.PI * 2); ctx.fill();
     }
 
-    // butterfly highlight ring
-    if (highlightStep >= 0 && mode === 'replaying' && currentStepIndex === highlightStep && ball) {
-      const pulse = 0.6 + Math.sin(performance.now() / 100) * 0.4;
-      ctx.strokeStyle = '#ffd84a';
-      ctx.shadowColor = '#ffd84a'; ctx.shadowBlur = 30;
-      ctx.lineWidth = 3;
-      ctx.beginPath(); ctx.arc(ball.position.x, ball.position.y, 24 + pulse * 8, 0, Math.PI * 2); ctx.stroke();
-      ctx.shadowBlur = 0;
+    // butterfly highlight ring — sustained for ~900ms after the step is first reached.
+    if (highlightStep >= 0 && mode === 'replaying' && highlightHitAt && ball) {
+      const age = performance.now() - highlightHitAt;
+      if (age < 900) {
+        const decay = 1 - (age / 900);
+        const pulse = 0.6 + Math.sin(performance.now() / 100) * 0.4;
+        ctx.globalAlpha = 0.5 + decay * 0.5;
+        ctx.strokeStyle = '#ffd84a';
+        ctx.shadowColor = '#ffd84a'; ctx.shadowBlur = 30;
+        ctx.lineWidth = 2 + decay * 2;
+        ctx.beginPath();
+        ctx.arc(ball.position.x, ball.position.y, 24 + pulse * 10 + (1 - decay) * 18, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+        ctx.shadowBlur = 0;
+      }
     }
 
     ctx.restore();
+
+    // Dim wash behind the verdict (drawn over the canvas, under DOM overlays).
+    if (resultDim > 0) {
+      ctx.fillStyle = `rgba(2, 3, 10, ${resultDim})`;
+      ctx.fillRect(0, 0, W, H);
+    }
   }
 
   function drawRect(body, color, blur = 8) {
@@ -939,39 +1078,128 @@
     c.lineTo(x, y + r); c.quadraticCurveTo(x, y, x + r, y);
   }
 
-  // ───────────────────────────── UI handlers
-  flipBtn.addEventListener('click', async () => {
-    // Best-effort audio. If the audio context can't start (some preview/test
-    // environments), continue silent rather than blocking the flip.
+  // ───────────────────────────── URL state, share, mute
+  function parseUrlState() {
+    const u = new URL(window.location.href);
+    const seedRaw = u.searchParams.get('seed');
+    const qRaw = u.searchParams.get('q');
+    let seed = null;
+    if (seedRaw) {
+      const n = parseInt(seedRaw, 16);
+      if (Number.isFinite(n)) seed = n >>> 0;
+    }
+    return { seed, q: qRaw || '' };
+  }
+  function writeUrlState() {
+    try {
+      const u = new URL(window.location.href);
+      u.searchParams.set('seed', currentSeed.toString(16));
+      const q = (qInput.value || '').trim();
+      if (q) u.searchParams.set('q', q); else u.searchParams.delete('q');
+      window.history.replaceState({}, '', u.toString());
+    } catch (e) { /* file:// has no URL */ }
+  }
+  function shareUrl() {
+    try {
+      const u = new URL(window.location.href);
+      u.searchParams.set('seed', currentSeed.toString(16));
+      const q = (qInput.value || '').trim();
+      if (q) u.searchParams.set('q', q); else u.searchParams.delete('q');
+      return u.toString();
+    } catch (e) { return window.location.href; }
+  }
+  function showToast(msg) {
+    toast.textContent = msg;
+    toast.classList.remove('hidden');
+    requestAnimationFrame(() => toast.classList.add('show'));
+    clearTimeout(showToast._t);
+    showToast._t = setTimeout(() => {
+      toast.classList.remove('show');
+      setTimeout(() => toast.classList.add('hidden'), 220);
+    }, 1700);
+  }
+
+  // Mute toggle — persisted in localStorage so the preference sticks.
+  const MUTE_KEY = 'flipper.muted';
+  let muted = false;
+  try { muted = localStorage.getItem(MUTE_KEY) === '1'; } catch (e) {}
+  function applyMute() {
+    muteBtn.setAttribute('aria-pressed', muted ? 'true' : 'false');
+    muteBtn.setAttribute('aria-label', muted ? 'Unmute audio' : 'Mute audio');
+    const x  = muteBtn.querySelector('#muteX');
+    const wv = muteBtn.querySelector('#muteWv');
+    if (x)  x.style.display  = muted ? '' : 'none';
+    if (wv) wv.style.display = muted ? 'none' : '';
+    try {
+      if (window.Tone && window.Tone.getDestination) {
+        window.Tone.getDestination().mute = muted;
+      }
+    } catch (e) {}
+  }
+  applyMute();
+  muteBtn.addEventListener('click', () => {
+    muted = !muted;
+    try { localStorage.setItem(MUTE_KEY, muted ? '1' : '0'); } catch (e) {}
+    applyMute();
+  });
+
+  // ───────────────────────────── Click / keyboard handlers
+  async function bestEffortAudio() {
     try {
       await Promise.race([
         A.init(),
         new Promise((_, rej) => setTimeout(() => rej(new Error('audio timeout')), 800))
       ]);
     } catch (e) { /* continue silent */ }
-    startFlip((Math.random() * 0xffffffff) >>> 0);
+    applyMute();
+  }
+
+  let flipInFlight = false;
+  flipBtn.addEventListener('click', async () => {
+    if (flipInFlight || mode === 'running' || mode === 'replaying') return;
+    flipInFlight = true;
+    flipBtn.disabled = true;
+    try {
+      await bestEffortAudio();
+      const fromUrl = pendingSeed;
+      pendingSeed = null;
+      const seed = (fromUrl != null) ? fromUrl : ((Math.random() * 0xffffffff) >>> 0);
+      startFlip(seed);
+    } finally {
+      flipBtn.disabled = false;
+      flipInFlight = false;
+    }
   });
+
   qInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') flipBtn.click();
+    if (e.key === 'Enter') { e.preventDefault(); flipBtn.click(); }
   });
+
   againBtn.addEventListener('click', () => {
     result.classList.add('hidden');
     menu.classList.remove('hidden');
+    banner.classList.add('hidden');
     mode = 'idle';
     outcome = null;
     signs = null;
     if (engine) { World.clear(world, false); Engine.clear(engine); }
+    engine = null; world = null; ball = null; paddleBody = null;
     particles = []; sparks = []; modules = {};
+    resultDim = 0;
+    qInput.focus();
   });
+
   replayBtn.addEventListener('click', async () => {
-    if (currentSeed == null) return;
-    await A.init();
+    if (mode === 'replaying' || currentSeed == null) return;
+    await bestEffortAudio();
     mode = 'replaying';
     slowmoFactor = 0.4;
     result.classList.add('hidden');
     banner.classList.toggle('hidden', !banner.textContent);
     outcome = null;
     signs = null;
+    highlightHitAt = 0;
+    resultDim = 0;
     build(currentSeed);
     attachCollisionHandlers();
     camera.x = W/2; camera.y = H/2;
@@ -979,6 +1207,40 @@
     camera.zoom = 1; camera.targetZoom = 1;
     runStartTime = performance.now();
   });
+
+  shareBtn.addEventListener('click', async () => {
+    const url = shareUrl();
+    try {
+      await navigator.clipboard.writeText(url);
+      showToast('Link copied');
+    } catch (e) {
+      // Fallback: open a tiny prompt
+      window.prompt('Copy this link', url);
+    }
+  });
+
+  // Global keyboard: Space/F to flip from the menu or after a result.
+  window.addEventListener('keydown', (e) => {
+    const inField = e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA');
+    if (inField) return;
+    if (e.key === ' ' || e.key === 'f' || e.key === 'F') {
+      e.preventDefault();
+      if (mode === 'idle') flipBtn.click();
+      else if (mode === 'done') { againBtn.click(); setTimeout(() => flipBtn.click(), 60); }
+    } else if (e.key === 'r' || e.key === 'R') {
+      if (mode === 'done') replayBtn.click();
+    } else if (e.key === 'm' || e.key === 'M') {
+      muteBtn.click();
+    }
+  });
+
+  // ───────────────────────────── Seed-from-URL bootstrap
+  let pendingSeed = null;
+  (() => {
+    const { seed, q } = parseUrlState();
+    if (q && !qInput.value) qInput.value = q;
+    if (seed != null) pendingSeed = seed;
+  })();
 
   lastT = performance.now();
   scheduleNext(loop);

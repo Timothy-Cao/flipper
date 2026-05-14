@@ -2,3 +2,9 @@
 node_modules/
 .vscode/
 .idea/
+*.log
+.env*
+.cache/
+dist/
+coverage/
+.claude/settings.local.json
