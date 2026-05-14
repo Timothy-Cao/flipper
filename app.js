@@ -110,7 +110,7 @@
     if (engine) { World.clear(world, false); Engine.clear(engine); }
     engine = Engine.create();
     world = engine.world;
-    engine.gravity.y = 1.0;
+    engine.gravity.y = 1.2;
     particles = []; sparks = []; creatureFX = []; modules = {}; staticDraw = [];
     runEvents = [];
     currentStepIndex = 0;
@@ -178,7 +178,7 @@
         const py = pegY0 + r * pegSpacingY + rrange(-3, 3);
         const angle = rrange(-Math.PI / 36, Math.PI / 36); // ±5°
         const peg = Bodies.rectangle(px, py, 28, 6, {
-          isStatic: true, angle, restitution: rrange(0.65, 0.85),
+          isStatic: true, angle, restitution: rrange(0.45, 0.65),
           friction: 0.05, label: 'peg'
         });
         pegs.push(peg);
@@ -402,13 +402,14 @@
     camera.x = W/2; camera.y = H/2;
     camera.targetX = W/2; camera.targetY = H/2;
     camera.zoom = 1; camera.targetZoom = 1;
+    stuckFrames = 0; lastBallY = ball.position.y;
     runStartTime = performance.now();
-    // Safety timeout: if nothing decides within 18s, force decision by ball x
+    // Safety timeout: if nothing decides within 12s, force decision by ball x
     setTimeout(() => {
       if (!signs?.decided && (mode === 'running' || mode === 'replaying')) {
         finishRun(ball.position.x < W/2 ? 'yes' : 'no');
       }
-    }, 18000 / slowmoFactor);
+    }, 9000);
   }
 
   function finishRun(which) {
@@ -557,6 +558,8 @@
 
   // ───────────────────────────── Main loop
   let lastT = performance.now();
+  let stuckFrames = 0;
+  let lastBallY = 0;
   function loop(t) {
     const dt = Math.min(40, t - lastT);
     lastT = t;
@@ -598,6 +601,23 @@
       if (ball) {
         particles.push({ x: ball.position.x, y: ball.position.y, life: 1 });
         if (particles.length > 40) particles.shift();
+      }
+
+      // Anti-stuck: if the ball isn't making downward progress, nudge it.
+      if (ball) {
+        const dy = ball.position.y - lastBallY;
+        if (dy < 0.5) {
+          stuckFrames++;
+          if (stuckFrames > 40) {
+            Body.applyForce(ball, ball.position, {
+              x: (rand() - 0.5) * 0.014, y: 0.006
+            });
+            stuckFrames = 0;
+          }
+        } else {
+          stuckFrames = 0;
+        }
+        lastBallY = ball.position.y;
       }
 
       // camera follow — gentle bias toward the ball's vertical position
@@ -921,7 +941,14 @@
 
   // ───────────────────────────── UI handlers
   flipBtn.addEventListener('click', async () => {
-    try { await A.init(); } catch (e) { /* continue silent */ }
+    // Best-effort audio. If the audio context can't start (some preview/test
+    // environments), continue silent rather than blocking the flip.
+    try {
+      await Promise.race([
+        A.init(),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('audio timeout')), 800))
+      ]);
+    } catch (e) { /* continue silent */ }
     startFlip((Math.random() * 0xffffffff) >>> 0);
   });
   qInput.addEventListener('keydown', (e) => {
