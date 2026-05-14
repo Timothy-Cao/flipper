@@ -71,15 +71,14 @@
   const WORLD_H          = START_PAD + SECTION_H * SECTION_COUNT + FINISH_PAD;
   const FINISH_Y         = START_PAD + SECTION_H * SECTION_COUNT + 60;
 
-  // Tuned for a 15s–90s race with lots of variance. The marbles bounce, get
-  // stuck, find shortcuts — variance is the point.
-  const GRAVITY          = 0.40;    // px / frame² (60fps reference)
-  const AIR_DRAG_X       = 0.992;
-  const AIR_DRAG_Y       = 0.999;
-  const TERMINAL_VY      = 8.5;
-  const RESTITUTION      = 0.5;
+  // Tuned for a 15s–90s race with lots of variance. Free rolling on ramps,
+  // restitution absorbs collision energy; no per-contact velocity drain.
+  const GRAVITY          = 0.50;    // px / frame² (60fps reference)
+  const AIR_DRAG_X       = 0.997;
+  const AIR_DRAG_Y       = 0.9994;
+  const TERMINAL_VY      = 11.5;
+  const RESTITUTION      = 0.42;
   const BALL_R           = 14;
-  const BALL_FRICTION    = 0.99;
   const SUBSTEPS         = 3;       // physics sub-steps per render frame
 
   const COLORS = {
@@ -103,6 +102,7 @@
   let cameraTargetY= 0;
   let mode         = 'idle'; // 'idle' | 'racing' | 'finishing' | 'done'
   let winner       = null;
+  let winnerMarginPx = 0;
   let raceStart    = 0;
   let raceElapsed  = 0;
   let finishDelay  = 0;      // counted down while finishing
@@ -184,7 +184,7 @@
     pushStaticSegment(W - 20, 0, W - 20, WORLD_H, 4, COLORS.magenta);
 
     // Sections
-    const templates = ['pegfield', 'spinners', 'funnel', 'hammers', 'cross', 'gauntlet'];
+    const templates = ['pegfield', 'bigWheel', 'cascade', 'hammers', 'cross', 'gauntlet', 'gearPair'];
     let lastTemplate = null;
     for (let s = 0; s < SECTION_COUNT; s++) {
       const y0 = START_PAD + s * SECTION_H;
@@ -227,134 +227,186 @@
   }
 
   // — Section templates —
+  // Every section is built to feel dominated by one or two BIG moving pieces
+  // (or one dense field of static pieces) — never mostly empty space.
   function buildSection(template, y0) {
-    if (template === 'pegfield')      return buildPegfield(y0);
-    if (template === 'spinners')      return buildSpinners(y0);
-    if (template === 'funnel')        return buildFunnel(y0);
-    if (template === 'hammers')       return buildHammers(y0);
-    if (template === 'cross')         return buildCross(y0);
-    if (template === 'gauntlet')      return buildGauntlet(y0);
+    if (template === 'pegfield')   return buildPegfield(y0);
+    if (template === 'bigWheel')   return buildBigWheel(y0);
+    if (template === 'cascade')    return buildCascade(y0);
+    if (template === 'hammers')    return buildHammers(y0);
+    if (template === 'cross')      return buildCross(y0);
+    if (template === 'gauntlet')   return buildGauntlet(y0);
+    if (template === 'gearPair')   return buildGearPair(y0);
   }
 
+  // Dense plinko — 8 rows, tightly packed, big pegs that actually catch.
   function buildPegfield(y0) {
-    const rows = 6;
-    const inset = 50;
+    const rows = 8;
+    const inset = 38;
     for (let r = 0; r < rows; r++) {
-      const cols = 6 + (r % 2);
+      const cols = 7 + (r % 2);
       const span = W - inset * 2;
       const gap = span / (cols + 1);
       for (let c = 0; c < cols; c++) {
         const px = inset + gap * (c + 1) + ((r % 2) ? -gap / 2 : 0) + rrange(-4, 4);
-        const py = y0 + 80 + r * 95 + rrange(-3, 3);
-        pushStaticCircle(px, py, 9, COLORS.cyan);
+        const py = y0 + 60 + r * 78 + rrange(-3, 3);
+        pushStaticCircle(px, py, 13, COLORS.cyan);
       }
     }
   }
 
-  function buildSpinners(y0) {
-    const count = 2 + Math.floor(rand() * 2);
-    for (let i = 0; i < count; i++) {
-      const cx = 100 + rrange(0, W - 200);
-      const cy = y0 + 130 + i * (SECTION_H - 260) / Math.max(1, count - 1);
-      const length = rrange(70, 110);
-      const omega = rrange(0.020, 0.045) * (rand() < 0.5 ? -1 : 1);
+  // One huge multi-arm rotor (cross or T) that dominates the section.
+  // Two or three arms sharing a pivot and spinning together — they sweep
+  // across most of the canvas width.
+  function buildBigWheel(y0) {
+    const cx = W / 2 + rrange(-20, 20);
+    const cy = y0 + SECTION_H * 0.5;
+    const length = rrange(220, 280);
+    const armCount = choice([2, 3, 4]);
+    const omega = rrange(0.018, 0.034) * (rand() < 0.5 ? -1 : 1);
+    const baseAngle = rand() * Math.PI * 2;
+    const colorOrder = rand() < 0.5
+      ? [COLORS.cyan, COLORS.magenta]
+      : [COLORS.magenta, COLORS.cyan];
+    for (let i = 0; i < armCount; i++) {
+      const offset = (i / armCount) * Math.PI * 2;
       kinObs.push({
         kind: 'arm',
         cx, cy, length, omega,
-        angle: rand() * Math.PI * 2,
-        thick: 9,
-        color: COLORS.magenta
+        angle: baseAngle + offset,
+        thick: 14,
+        color: colorOrder[i % 2]
       });
-      // peg at pivot to keep balls from getting glued there
-      pushStaticCircle(cx, cy, 7, COLORS.cyan);
     }
-    // a few stray pegs to scatter trajectories
-    for (let i = 0; i < 5; i++) {
-      pushStaticCircle(rrange(60, W - 60), y0 + rrange(80, SECTION_H - 80), 7, COLORS.cyan);
+    // Hub disc so the center isn't a gap
+    pushStaticCircle(cx, cy, 18, COLORS.cyan);
+    // Big corner bumpers around the rotor so marbles can't just glide past
+    const cornerR = 200;
+    const cornerPegR = 18;
+    for (let a = 0; a < 4; a++) {
+      const ang = Math.PI / 4 + a * Math.PI / 2;
+      const px = cx + Math.cos(ang) * cornerR;
+      const py = cy + Math.sin(ang) * cornerR;
+      if (px > 50 && px < W - 50 && py > y0 + 60 && py < y0 + SECTION_H - 60) {
+        pushStaticCircle(px, py, cornerPegR, a % 2 === 0 ? COLORS.cyan : COLORS.magenta);
+      }
     }
   }
 
-  function buildFunnel(y0) {
-    // Two angled walls forming a wide-to-narrow funnel, then a small gap.
-    const top = y0 + 80;
-    const bottom = y0 + SECTION_H - 100;
-    const gap = rrange(80, 120);
-    const cx = W / 2 + rrange(-30, 30);
-    pushStaticSegment(40,        top,        cx - gap / 2, bottom, 6, COLORS.cyan);
-    pushStaticSegment(W - 40,    top,        cx + gap / 2, bottom, 6, COLORS.magenta);
-    // a couple of bumpers at the funnel mouth
-    pushStaticCircle(cx - gap / 2 - 14, bottom, 8, COLORS.cyan);
-    pushStaticCircle(cx + gap / 2 + 14, bottom, 8, COLORS.magenta);
-    // small ramps below the gap so the next section catches the flow
-    pushStaticSegment(40, bottom + 40, cx - 60, bottom + 40, 4, COLORS.cyan);
-    pushStaticSegment(W - 40, bottom + 40, cx + 60, bottom + 40, 4, COLORS.magenta);
+  // Three-stage cascade of funnels: each narrows to a hard gap, marbles
+  // ricochet off bumpers between stages. Fills the section top-to-bottom.
+  function buildCascade(y0) {
+    const stages = 3;
+    for (let i = 0; i < stages; i++) {
+      const top    = y0 + 40 + i * (SECTION_H / stages);
+      const bottom = y0 + (i + 1) * (SECTION_H / stages) - 20;
+      const cx = W / 2 + (i % 2 === 0 ? -1 : 1) * rrange(20, 60);
+      const gap = rrange(70, 100);
+      pushStaticSegment(50,       top, cx - gap / 2, bottom, 7, COLORS.cyan);
+      pushStaticSegment(W - 50,   top, cx + gap / 2, bottom, 7, COLORS.magenta);
+      // bumpers at the throat
+      pushStaticCircle(cx - gap / 2 - 16, bottom, 11, COLORS.cyan);
+      pushStaticCircle(cx + gap / 2 + 16, bottom, 11, COLORS.magenta);
+    }
   }
 
+  // Three big swinging hammers on alternating sides, each spanning ~40% of
+  // canvas width with heavy bobs that genuinely punch marbles around.
   function buildHammers(y0) {
-    // 2 swinging hammers alternating sides, plus a center divider with slits.
-    const dividerX = W / 2 + rrange(-10, 10);
-    pushStaticSegment(dividerX, y0 + 30, dividerX, y0 + 200, 3, 'rgba(41,247,255,0.35)');
-    pushStaticSegment(dividerX, y0 + 280, dividerX, y0 + SECTION_H - 80, 3, 'rgba(255,61,240,0.35)');
-
-    const hammerCount = 2;
+    const hammerCount = 3;
     for (let i = 0; i < hammerCount; i++) {
       const side = (i % 2 === 0) ? -1 : 1;
-      const cx = W / 2 + side * (W * 0.30);
-      const cy = y0 + 140 + i * 280;
+      const cx = W / 2 + side * (W * 0.32);
+      const cy = y0 + 110 + i * ((SECTION_H - 220) / (hammerCount - 1));
       kinObs.push({
         kind: 'hammer',
         cx, cy,
-        length: 110 + rrange(-10, 10),
-        bobR: 22,
-        baseAngle: side > 0 ? -Math.PI / 2 - 0.6 : -Math.PI / 2 + 0.6,
-        amp: 1.0 + rrange(-0.1, 0.1),
+        length: rrange(170, 220),
+        bobR: rrange(28, 36),
+        baseAngle: side > 0 ? -Math.PI / 2 - 0.4 : -Math.PI / 2 + 0.4,
+        amp: 1.15 + rrange(-0.1, 0.1),
         phase: rand() * Math.PI * 2,
-        omega: rrange(0.035, 0.06),
+        omega: rrange(0.030, 0.050),
         color: side > 0 ? COLORS.magenta : COLORS.cyan,
-        thick: 6
+        thick: 8
       });
+    }
+    // A line of pegs down the middle to interfere with the swept arcs
+    for (let r = 0; r < 4; r++) {
+      pushStaticCircle(W / 2 + rrange(-12, 12), y0 + 130 + r * 160, 12, r % 2 === 0 ? COLORS.cyan : COLORS.magenta);
     }
   }
 
+  // X-shaped chamber: big diamond walls with a corner peg cluster on each side
+  // and a single big rotor stitched through, so marbles have to thread or get hit.
   function buildCross(y0) {
-    // X-shaped peg cluster with a center diamond — fan-out chaos.
     const cx = W / 2;
     const cy = y0 + SECTION_H / 2;
-    // diamond outline (4 segments)
-    const d = 100;
-    pushStaticSegment(cx - d, cy, cx, cy - d, 4, COLORS.cyan);
-    pushStaticSegment(cx, cy - d, cx + d, cy, 4, COLORS.magenta);
-    pushStaticSegment(cx + d, cy, cx, cy + d, 4, COLORS.magenta);
-    pushStaticSegment(cx, cy + d, cx - d, cy, 4, COLORS.cyan);
-    // pegs at the corners
-    pushStaticCircle(cx - d, cy, 10, COLORS.cyan);
-    pushStaticCircle(cx + d, cy, 10, COLORS.magenta);
-    pushStaticCircle(cx, cy - d, 10, COLORS.cyan);
-    pushStaticCircle(cx, cy + d, 10, COLORS.magenta);
-    // gear-like spinner above and below
+    const d = 150;
+    pushStaticSegment(cx - d, cy, cx, cy - d, 6, COLORS.cyan);
+    pushStaticSegment(cx, cy - d, cx + d, cy, 6, COLORS.magenta);
+    pushStaticSegment(cx + d, cy, cx, cy + d, 6, COLORS.magenta);
+    pushStaticSegment(cx, cy + d, cx - d, cy, 6, COLORS.cyan);
+    pushStaticCircle(cx - d, cy, 14, COLORS.cyan);
+    pushStaticCircle(cx + d, cy, 14, COLORS.magenta);
+    pushStaticCircle(cx, cy - d, 14, COLORS.cyan);
+    pushStaticCircle(cx, cy + d, 14, COLORS.magenta);
+    // A big spinning bar threading through the diamond on one diagonal
     kinObs.push({
-      kind: 'gear', cx: 120, cy: y0 + 130, length: 60, r: 24, teeth: 8,
-      angle: 0, omega: rrange(0.025, 0.045) * (rand() < 0.5 ? -1 : 1), color: COLORS.cyan
+      kind: 'arm', cx, cy, length: 130, omega: rrange(0.025, 0.04) * (rand() < 0.5 ? -1 : 1),
+      angle: rand() * Math.PI * 2, thick: 11, color: COLORS.magenta
     });
     kinObs.push({
-      kind: 'gear', cx: W - 120, cy: y0 + SECTION_H - 130, length: 60, r: 24, teeth: 8,
-      angle: 0, omega: rrange(0.025, 0.045) * (rand() < 0.5 ? -1 : 1), color: COLORS.magenta
+      kind: 'arm', cx, cy, length: 130, omega: rrange(0.025, 0.04) * (rand() < 0.5 ? -1 : 1),
+      angle: rand() * Math.PI * 2 + Math.PI / 2, thick: 11, color: COLORS.cyan
     });
   }
 
+  // Pair of large counter-rotating gears that almost touch — marbles squeeze
+  // between them and get spun into the next section.
+  function buildGearPair(y0) {
+    const cy = y0 + SECTION_H * 0.45;
+    const r = rrange(58, 72);
+    const gap = rrange(50, 70);
+    const omega1 = rrange(0.022, 0.038);
+    const omega2 = -omega1;             // counter-rotating
+    kinObs.push({
+      kind: 'gear', cx: W / 2 - r - gap / 2, cy, r, teeth: 10, length: r,
+      angle: 0, omega: omega1, color: COLORS.cyan
+    });
+    kinObs.push({
+      kind: 'gear', cx: W / 2 + r + gap / 2, cy, r, teeth: 10, length: r,
+      angle: 0, omega: omega2, color: COLORS.magenta
+    });
+    // Funnel walls feeding marbles into the gear gap
+    pushStaticSegment(40,      y0 + 60,  W / 2 - r - gap / 2 - 24, cy - r - 8, 6, COLORS.cyan);
+    pushStaticSegment(W - 40,  y0 + 60,  W / 2 + r + gap / 2 + 24, cy - r - 8, 6, COLORS.magenta);
+    // Exit ramps below
+    pushStaticSegment(W / 2 - r - gap / 2 - 24, cy + r + 8,  60,      y0 + SECTION_H - 30, 5, COLORS.cyan);
+    pushStaticSegment(W / 2 + r + gap / 2 + 24, cy + r + 8,  W - 60,  y0 + SECTION_H - 30, 5, COLORS.magenta);
+  }
+
+  // Tight serpentine of long ledges with steep drops to encourage rolling.
   function buildGauntlet(y0) {
-    // Serpentine ledges with gaps.
-    let leftEdge = 30, rightEdge = W - 30;
-    const steps = 5;
+    const leftEdge = 28, rightEdge = W - 28;
+    const steps = 6;
     for (let i = 0; i < steps; i++) {
-      const yy = y0 + 90 + i * (SECTION_H - 160) / (steps - 1);
-      const side = i % 2;       // 0 = ledge from left, 1 = ledge from right
-      const len = rrange(W * 0.55, W * 0.72);
+      const yy = y0 + 70 + i * (SECTION_H - 140) / (steps - 1);
+      const side = i % 2;
+      const len = rrange(W * 0.62, W * 0.78);
+      const tilt = rrange(35, 65);     // steeper ramps → faster rolling
       if (side === 0) {
-        pushStaticSegment(leftEdge, yy, leftEdge + len, yy + rrange(20, 40), 5, COLORS.cyan);
+        pushStaticSegment(leftEdge, yy, leftEdge + len, yy + tilt, 7, COLORS.cyan);
       } else {
-        pushStaticSegment(rightEdge, yy, rightEdge - len, yy + rrange(20, 40), 5, COLORS.magenta);
+        pushStaticSegment(rightEdge, yy, rightEdge - len, yy + tilt, 7, COLORS.magenta);
       }
+    }
+    // a wall-bouncer peg on each tier
+    for (let i = 0; i < steps; i++) {
+      const yy = y0 + 80 + i * (SECTION_H - 140) / (steps - 1) + 50;
+      const side = i % 2 === 0 ? 1 : -1;
+      const px = side > 0 ? W - 60 : 60;
+      pushStaticCircle(px, yy, 14, side > 0 ? COLORS.magenta : COLORS.cyan);
     }
   }
 
@@ -588,11 +640,9 @@
 
       b._cooldown = Math.max(0, b._cooldown - 0.016 * dt);
 
-      // Light friction when in contact
-      if (hit) {
-        b.vx *= BALL_FRICTION;
-        b.vy *= BALL_FRICTION;
-      }
+      // No multiplicative friction on contact — let the marble keep its
+      // tangential speed so rolling on slopes actually accelerates instead
+      // of decaying frame-by-frame.
 
       // Trail (sparse)
       b._trailT = (b._trailT || 0) + dt;
@@ -605,8 +655,13 @@
       // Finish?
       if (!b.finished && b.y >= FINISH_Y) {
         b.finished = true;
+        b.finishedAt = raceElapsed;
         if (winner === null) {
           winner = b.label;
+          // Snapshot the trailing marble's y at the moment of crossing — that's
+          // the real margin of victory in pixels.
+          const other = balls.find(x => x !== b);
+          winnerMarginPx = other ? Math.max(0, Math.round(FINISH_Y - other.y)) : 0;
           mode = 'finishing';
           finishDelay = 1.0;       // sec of hold before result reveal
           chord(b.label === 'yes' ? [392, 494, 587, 784] : [330, 261, 196, 165], 480, 'sawtooth');
@@ -856,6 +911,7 @@
     spawnBalls();
     cameraY = 0; cameraTargetY = 0;
     winner = null;
+    winnerMarginPx = 0;
     mode = 'racing';
     raceStart = performance.now();
     raceElapsed = 0;
@@ -877,14 +933,14 @@
     mode = 'done';
     verdict.textContent = which.toUpperCase();
     verdict.className = 'verdict ' + which;
-    const margin = (() => {
-      const a = balls[0], b = balls[1];
-      const dist = Math.abs(a.y - b.y);
-      return dist;
-    })();
     const secs = (raceElapsed / 1000).toFixed(1);
-    resultMeta.textContent =
-      `${secs}s · WON BY ${Math.round(margin)} PX`;
+    const margin = winnerMarginPx;
+    let marginLabel;
+    if (margin <= 6) marginLabel = 'PHOTO FINISH';
+    else if (margin <= 50)  marginLabel = `WON BY ${margin} PX`;
+    else if (margin <= 200) marginLabel = `WON BY A NOSE — ${margin} PX`;
+    else marginLabel = `WON GOING AWAY — ${margin} PX`;
+    resultMeta.textContent = `${secs}S · ${marginLabel}`;
     result.classList.remove('hidden');
     hud.classList.add('hidden');
     writeUrlState();
