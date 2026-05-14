@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>FLIPPER</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main id="stage">
+    <canvas id="world" width="700" height="980"></canvas>
+
+    <!-- Menu (visible before flipping) -->
+    <section id="menu" class="overlay">
+      <h1 class="neon">FLIPPER</h1>
+      <p class="sub">Ask the universe.</p>
+      <input id="question" type="text" placeholder="optional question…" maxlength="80" autocomplete="off" />
+      <button id="flip" class="big-btn">FLIP</button>
+      <p class="hint">It's never rigged. Every step rolls the dice.</p>
+    </section>
+
+    <!-- Question banner during run -->
+    <div id="banner" class="hidden"></div>
+
+    <!-- Result screen -->
+    <section id="result" class="overlay hidden">
+      <div id="verdict" class="verdict"></div>
+      <div class="row">
+        <button id="again" class="btn">Flip again</button>
+        <button id="replay" class="btn">Replay in slow-mo</button>
+      </div>
+      <p id="butterfly" class="hint"></p>
+    </section>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/matter-js@0.19.0/build/matter.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
