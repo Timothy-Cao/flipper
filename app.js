@@ -420,7 +420,7 @@
     // Wall-hugging half-circles along edges
     pushBumper(20,    y0 + 70,  28);
     pushBumper(W-20,  y0 + 70,  28);
-    pushBumper(20,    y0 + 200, 24);
+    pushBumper(20,    y0 + 200, 16);
     pushBumper(W-20,  y0 + 200, 24);
     // Interior rows — offsets from center
     const rows = [
