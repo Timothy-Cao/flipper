@@ -197,7 +197,7 @@
 
     // Hand-designed sequence. Y coords laid out top-to-bottom.
     buildStartFunnel(0);            //   0 — 240   opening plinko, immediately
-    buildAngledRails(240);          // 240 — 480   two angled rails (deliberately spare)
+    buildBlackHoles(240);           // 240 — 480   alternating gravity wells
     buildPlinkoTwinFunnel(480);     // 480 — 1060  deeper plinko into twin funnels
     buildHexSpinners(1060);         // 1060 — 1980 hex tiling of 7 giant X rotors
     buildGateChannels(1980);        // 1980 — 2300 dividers + moving-hole gate
@@ -223,6 +223,7 @@
       else if (o.kind === 'wallFlipper')         insert(o, o.cy - o.length - 12, o.cy + o.length + 12);
       else if (o.kind === 'hammer')              insert(o, o.cy - 8, o.cy + o.length + o.bobR + 8);
       else if (o.kind === 'movingFloor')         insert(o, o.y - 30, o.y + 30);
+      else if (o.kind === 'blackHole')           insert(o, o.cy - o.pullR - 4, o.cy + o.pullR + 4);
     }
   }
 
@@ -279,12 +280,30 @@
     }
   }
 
-  // 2 · Two angled rails — deliberately spare connector that fans the
-  // marbles outward before the plinko field below.
-  function buildAngledRails(y0) {
-    pushSectionLabel('DRIFT RAILS', y0 + 22);
-    pushStaticSegment(W/2 - 40, y0 + 30,  60,     y0 + 200, 6, COLORS.cyan);
-    pushStaticSegment(W/2 + 40, y0 + 30,  W - 60, y0 + 200, 6, COLORS.magenta);
+  // 2 · Four gravity wells that alternate on/off in pairs.
+  function buildBlackHoles(y0) {
+    pushSectionLabel('GRAVITY WELLS', y0 + 22);
+    const positions = [
+      { x: W * 0.22, y: y0 + 80,  group: 0 },
+      { x: W * 0.78, y: y0 + 80,  group: 1 },
+      { x: W * 0.35, y: y0 + 190, group: 1 },
+      { x: W * 0.65, y: y0 + 190, group: 0 },
+    ];
+    for (const p of positions) {
+      kinObs.push({
+        kind: 'blackHole',
+        cx: p.x,
+        cy: p.y,
+        visR: 18,
+        pullR: 180,
+        strength: 0.85,
+        group: p.group,
+        phase: rand() * Math.PI * 2,
+        period: 2.2 + rand() * 0.6,
+        active: 0,
+        color: p.group === 0 ? COLORS.cyan : COLORS.magenta
+      });
+    }
   }
 
   // 3 · Plinko field that drops into two side-by-side funnels.
@@ -404,21 +423,21 @@
   }
 
   function spawnWallFlipper(side, y, phase) {
-    const wallX = side === 'left' ? W / 2 - 82 : W / 2 + 82;
-    const base = side === 'left' ? 0.18 : Math.PI - 0.18;
-    const swing = side === 'left' ? -1.12 : 1.12;
+    const wallX = side === 'left' ? W / 2 - 120 : W / 2 + 120;
+    const base = side === 'left' ? 0.22 : Math.PI - 0.22;
+    const swing = side === 'left' ? -1.35 : 1.35;
     kinObs.push({
       kind: 'wallFlipper',
       side,
       cx: wallX,
       cy: y,
-      length: 89,
-      thick: 13,
+      length: 100,
+      thick: 14,
       baseAngle: base,
       swing,
       angle: base,
       phase,
-      omega: 0.075 + rand() * 0.012,
+      omega: 0.047 + rand() * 0.025,
       active: 0,
       color: side === 'left' ? COLORS.cyan : COLORS.magenta
     });
@@ -427,18 +446,17 @@
   // 7 · Long final funnel into a flipper chute, then straight into the finish.
   function buildFinishFunnel(y0) {
     pushSectionLabel('KICKER CHUTE', y0 + 32);
-    pushStaticSegment(40,     y0,      W/2 - 70, y0 + 190, 8, COLORS.cyan);
-    pushStaticSegment(W - 40, y0,      W/2 + 70, y0 + 190, 8, COLORS.magenta);
+    pushStaticSegment(40,     y0,      W/2 - 120, y0 + 190, 8, COLORS.cyan);
+    pushStaticSegment(W - 40, y0,      W/2 + 120, y0 + 190, 8, COLORS.magenta);
 
-    const chuteTop = y0 + 178;
+    const chuteTop = y0 + 190;
     const chuteBot = y0 + 720;
-    pushStaticSegment(W/2 - 82, chuteTop, W/2 - 82, chuteBot, 7, COLORS.cyan);
-    pushStaticSegment(W/2 + 82, chuteTop, W/2 + 82, chuteBot, 7, COLORS.magenta);
+    pushStaticSegment(W/2 - 120, chuteTop, W/2 - 120, chuteBot, 7, COLORS.cyan);
+    pushStaticSegment(W/2 + 120, chuteTop, W/2 + 120, chuteBot, 7, COLORS.magenta);
 
-    for (let i = 0; i < 4; i++) {
-      const side = i % 2 === 0 ? 'left' : 'right';
-      spawnWallFlipper(side, chuteTop + 104 + i * 118, rand() * Math.PI * 2);
-    }
+    const flipY = chuteTop + 280;
+    spawnWallFlipper('left',  flipY, rand() * Math.PI * 2);
+    spawnWallFlipper('right', flipY, rand() * Math.PI * 2);
   }
 
   // ───────────────────────────── Prerender static layer
@@ -612,6 +630,10 @@
       } else if (o.kind === 'movingFloor') {
         // Period is in seconds; dt is in frame units (1 = 1/60s).
         o.phase += (2 * Math.PI / (60 * o.period)) * dt;
+      } else if (o.kind === 'blackHole') {
+        o.phase += (2 * Math.PI / (60 * o.period)) * dt;
+        const wave = Math.sin(o.phase);
+        o.active = o.group === 0 ? Math.max(0, wave) : Math.max(0, -wave);
       }
     }
 
@@ -692,9 +714,9 @@
               hit = true;
               const tx = -Math.sin(o.angle), ty = Math.cos(o.angle);
               const wallPush = o.side === 'left' ? 1 : -1;
-              const smack = 0.55 + o.active * 3.2;
-              b.vx += tx * smack * 0.55 + wallPush * o.active * 1.3;
-              b.vy += ty * smack * 0.35 - o.active * 3.1;
+              const smack = 0.8 + o.active * 5.0;
+              b.vx += tx * smack * 0.6 + wallPush * o.active * 1.8;
+              b.vy += ty * smack * 0.4 - o.active * 5.5;
               if (b._cooldown <= 0) {
                 spark(b.x, b.y, o.color, 6);
                 blip(120 + o.active * 180, 120, 'sawtooth', 0.09);
@@ -763,6 +785,18 @@
               }
             }
             // ball within hole range falls through, no collision
+          } else if (o.kind === 'blackHole') {
+            if (o.active > 0.01) {
+              const dx = o.cx - b.x, dy = o.cy - b.y;
+              const d2 = dx * dx + dy * dy;
+              if (d2 < o.pullR * o.pullR && d2 > 1) {
+                const d = Math.sqrt(d2);
+                const falloff = 1 - d / o.pullR;
+                const force = o.strength * o.active * falloff * falloff * dt;
+                b.vx += (dx / d) * force;
+                b.vy += (dy / d) * force;
+              }
+            }
           }
         }
       }
@@ -1086,6 +1120,34 @@
       ctx.moveTo(hs, o.y - 11); ctx.lineTo(hs, o.y + 11);
       ctx.moveTo(he, o.y - 11); ctx.lineTo(he, o.y + 11);
       ctx.stroke();
+    } else if (o.kind === 'blackHole') {
+      ctx.save();
+      const a = o.active;
+      // Pull radius halo
+      if (a > 0.01) {
+        const grad = ctx.createRadialGradient(o.cx, o.cy, o.visR, o.cx, o.cy, o.pullR * a);
+        grad.addColorStop(0, `rgba(155, 124, 255, ${0.12 * a})`);
+        grad.addColorStop(1, 'rgba(155, 124, 255, 0)');
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(o.cx, o.cy, o.pullR * a, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      // Core
+      ctx.fillStyle = a > 0.01 ? `rgba(8, 4, 20, ${0.7 + 0.3 * a})` : 'rgba(8, 4, 20, 0.4)';
+      ctx.beginPath();
+      ctx.arc(o.cx, o.cy, o.visR, 0, Math.PI * 2);
+      ctx.fill();
+      // Ring
+      ctx.strokeStyle = o.color;
+      ctx.lineWidth = 2 + a * 2;
+      ctx.globalAlpha = 0.3 + a * 0.7;
+      ctx.shadowColor = o.color;
+      ctx.shadowBlur = 4 + a * 14;
+      ctx.beginPath();
+      ctx.arc(o.cx, o.cy, o.visR, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
     }
   }
 
