@@ -116,6 +116,7 @@
   let raceStart    = 0;
   let raceElapsed  = 0;
   let finishDelay  = 0;      // counted down while finishing
+  let finishFxStart = 0;
   let currentSeed  = 0;
   let pendingSeed  = null;
   let yesBallCount = DEFAULT_YES_BALLS;
@@ -354,7 +355,7 @@
     pushStaticCircle(cx, cy, 14, color);     // hub
   }
 
-  // 5 · Gated channels — 3 dividers split the section into 4 lanes, and a
+  // 5 · Gated channels — dividers split the section into booths, and a
   //     moving hole sweeps the floor below. Marbles wait on the floor for
   //     the hole to pass under them.
   function buildGateChannels(y0) {
@@ -372,7 +373,7 @@
       kind: 'movingFloor',
       y: floorY,
       floorThick: 9,
-      holeWidth: laneW * 0.92,
+      holeWidth: laneW * 1.62,
       amp: W / 2 - 68,
       period: 3.0,
       phase: rand() * Math.PI * 2,
@@ -738,9 +739,12 @@
             const hc = W / 2 + o.amp * Math.sin(o.phase);
             const hs = hc - o.holeWidth / 2;
             const he = hc + o.holeWidth / 2;
+            const leftEnd = Math.max(20, hs);
+            const rightStart = Math.min(W - 20, he);
             const ht = o.floorThick / 2;
-            if (b.x < hs) {
-              if (collideSegment(b, 20, o.y, hs, o.y, ht)) {
+            const edgeGrace = b.r * 0.65;
+            if (b.x + edgeGrace < hs) {
+              if (collideSegment(b, 20, o.y, leftEnd, o.y, ht)) {
                 hit = true;
                 if (b._cooldown <= 0) {
                   spark(b.x, b.y, o.color, 3);
@@ -748,8 +752,8 @@
                   b._cooldown = 0.08;
                 }
               }
-            } else if (b.x > he) {
-              if (collideSegment(b, he, o.y, W - 20, o.y, ht)) {
+            } else if (b.x - edgeGrace > he) {
+              if (collideSegment(b, rightStart, o.y, W - 20, o.y, ht)) {
                 hit = true;
                 if (b._cooldown <= 0) {
                   spark(b.x, b.y, o.color, 3);
@@ -785,6 +789,7 @@
         if (winner === null) {
           winner = b.label;
           winnerBall = b;
+          finishFxStart = raceElapsed;
           // Margin = how far back is the SECOND-place marble (could be either team).
           let secondY = 0;
           for (const other of balls) {
@@ -793,7 +798,8 @@
           }
           winnerMarginPx = Math.max(0, Math.round(FINISH_Y - secondY));
           mode = 'finishing';
-          finishDelay = 1.0;       // sec of hold before result reveal
+          finishDelay = 10.0;      // let the pack keep falling before the result overlay
+          banner.textContent = `${b.label.toUpperCase()} WINS`;
           chord(b.label === 'yes' ? [392, 494, 587, 784] : [330, 261, 196, 165], 480, 'sawtooth');
         }
       }
@@ -874,6 +880,8 @@
     ctx.save();
     ctx.translate(0, -camY);
 
+    drawFinishGlow(camY);
+
     // Kinematic obstacles (only those visible)
     const yMin = camY - 40, yMax = camY + H_VIEW + 40;
     for (const o of kinObs) {
@@ -903,6 +911,89 @@
     // Balls
     for (const b of balls) drawBall(b);
 
+    drawWinnerAnnouncement(camY);
+
+    ctx.restore();
+  }
+
+  function winnerColor() {
+    return winner === 'yes' ? COLORS.yesBall : COLORS.noBall;
+  }
+
+  function finishFxAmount() {
+    if (!winner || !finishFxStart) return 0;
+    return Math.min(1, Math.max(0, (raceElapsed - finishFxStart) / 900));
+  }
+
+  function drawFinishGlow(camY) {
+    if (!winner) return;
+    const color = winnerColor();
+    const amount = finishFxAmount();
+    const pulse = 0.82 + 0.18 * Math.sin((raceElapsed - finishFxStart) * 0.012);
+    const sy = FINISH_Y - camY;
+    const glowY = Math.max(camY + 90, Math.min(camY + H_VIEW - 90, FINISH_Y - 48));
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = (0.035 + amount * 0.055) * pulse;
+    ctx.fillStyle = color;
+    ctx.fillRect(0, camY, W, H_VIEW);
+
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = (0.07 + amount * 0.1) * pulse;
+    const grad = ctx.createRadialGradient(W / 2, glowY, 30, W / 2, glowY, 430);
+    grad.addColorStop(0, color);
+    grad.addColorStop(0.42, color);
+    grad.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, camY, W, H_VIEW);
+
+    if (sy > -140 && sy < H_VIEW + 220) {
+      ctx.globalAlpha = 0.22 + amount * 0.28;
+      ctx.shadowColor = color;
+      ctx.shadowBlur = 10 + amount * 14;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 4 + amount * 2;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(46, FINISH_Y - 150);
+      ctx.lineTo(46, FINISH_Y + 90);
+      ctx.moveTo(W - 46, FINISH_Y - 150);
+      ctx.lineTo(W - 46, FINISH_Y + 90);
+      ctx.stroke();
+
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = 0.08 + amount * 0.08;
+      ctx.fillStyle = color;
+      ctx.fillRect(36, FINISH_Y - 116, W - 72, 180);
+    }
+    ctx.restore();
+  }
+
+  function drawWinnerAnnouncement(camY) {
+    if (!winner) return;
+    const amount = finishFxAmount();
+    const color = winnerColor();
+    const y = Math.min(FINISH_Y - 118, camY + H_VIEW - 160);
+
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = 'bold 82px "Courier New", monospace';
+    ctx.letterSpacing = '0px';
+    ctx.globalAlpha = Math.min(0.96, amount * 1.3);
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 12;
+    ctx.lineWidth = 8;
+    ctx.strokeStyle = 'rgba(2,3,10,0.78)';
+    ctx.strokeText(winner.toUpperCase(), W / 2, y);
+    ctx.fillStyle = color;
+    ctx.fillText(winner.toUpperCase(), W / 2, y);
+
+    ctx.font = 'bold 14px "Courier New", monospace';
+    ctx.shadowBlur = 6;
+    ctx.globalAlpha = Math.min(0.78, amount * 1.1);
+    ctx.fillText('FIRST THROUGH THE FINISH', W / 2, y + 62);
     ctx.restore();
   }
 
@@ -979,12 +1070,14 @@
       const hc = W / 2 + o.amp * Math.sin(o.phase);
       const hs = hc - o.holeWidth / 2;
       const he = hc + o.holeWidth / 2;
+      const leftEnd = Math.max(20, hs);
+      const rightStart = Math.min(W - 20, he);
       ctx.strokeStyle = o.color;
       ctx.lineWidth = o.floorThick;
       ctx.lineCap = 'round';
       ctx.beginPath();
-      ctx.moveTo(20, o.y); ctx.lineTo(hs, o.y);
-      ctx.moveTo(he, o.y); ctx.lineTo(W - 20, o.y);
+      ctx.moveTo(20, o.y); ctx.lineTo(leftEnd, o.y);
+      ctx.moveTo(rightStart, o.y); ctx.lineTo(W - 20, o.y);
       ctx.stroke();
       // Yellow accent at the hole edges so the gate is readable
       ctx.strokeStyle = COLORS.finish;
@@ -1122,7 +1215,9 @@
     spawnBalls();
     cameraY = 0; cameraTargetY = 0;
     winner = null;
+    winnerBall = null;
     winnerMarginPx = 0;
+    finishFxStart = 0;
     mode = 'racing';
     raceStart = performance.now();
     raceElapsed = 0;
@@ -1144,7 +1239,8 @@
     mode = 'done';
     verdict.textContent = which.toUpperCase();
     verdict.className = 'verdict ' + which;
-    const secs = (raceElapsed / 1000).toFixed(1);
+    const finishMs = winnerBall && Number.isFinite(winnerBall.finishedAt) ? winnerBall.finishedAt : raceElapsed;
+    const secs = (finishMs / 1000).toFixed(1);
     const margin = winnerMarginPx;
     const marginLabel = margin <= 6 ? 'PHOTO FINISH' : `FIRST BY ${margin} PX`;
     resultMeta.textContent = `${secs}S · ${marginLabel}`;
@@ -1247,6 +1343,8 @@
   againBtn.addEventListener('click', () => {
     mode = 'idle';
     winner = null;
+    winnerBall = null;
+    finishFxStart = 0;
     balls = [];
     particles = [];
     result.classList.add('hidden');

@@ -338,11 +338,11 @@ html, body {
 }
 .verdict.yes {
   color: var(--yes);
-  text-shadow: 0 0 16px var(--yes), 0 0 48px var(--yes), 0 0 120px rgba(61, 255, 138, 0.52);
+  text-shadow: 0 0 10px rgba(61, 255, 138, 0.82), 0 0 30px rgba(61, 255, 138, 0.38);
 }
 .verdict.no {
   color: var(--no);
-  text-shadow: 0 0 16px var(--no), 0 0 48px var(--no), 0 0 120px rgba(255, 70, 96, 0.52);
+  text-shadow: 0 0 10px rgba(255, 70, 96, 0.82), 0 0 30px rgba(255, 70, 96, 0.38);
 }
 
 .result-meta {
