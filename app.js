@@ -1,6 +1,6 @@
 /* FLIPPER — neon marble race oracle.
  *
- * Two marbles (YES cyan, NO magenta) drop down a long vertical course
+ * Two teams of marbles (YES green, NO red) drop down a long vertical course
  * stuffed with pegs, spinners, hammers, gears, and funnels. The camera
  * follows whichever marble is in the lead. First to cross the finish
  * line answers the question.
@@ -70,23 +70,27 @@
   // Physics — tuned to feel like a marble race: bouncy contacts, free
   // rolling on ramps, no per-contact velocity drain. Pinball bumpers use
   // their own much-higher per-obstacle restitution.
-  const GRAVITY          = 0.38;    // px / frame² (60fps reference)
+  const GRAVITY          = 0.23;    // px / frame² (60fps reference) - low, drifty
+  const LEAD_GRAVITY_SCALE = 0.82;  // leader floats a touch
+  const COMEBACK_GRAVITY_BOOST = 0.42;
+  const COMEBACK_DISTANCE = 900;    // px behind leader to reach max boost
   const AIR_DRAG_X       = 0.996;
-  const AIR_DRAG_Y       = 0.9992;
-  const TERMINAL_VY      = 8.4;
-  const RESTITUTION      = 0.62;    // default for walls/pegs/pads
-  const BUMPER_RESTITUTION = 0.94;  // pinball-style bumpers
-  const BALL_R           = 14;
+  const AIR_DRAG_Y       = 0.9994;
+  const TERMINAL_VY      = 6.4;
+  const RESTITUTION      = 0.66;    // default for walls/pegs/pads
+  const BUMPER_RESTITUTION = 0.95;  // pinball-style bumpers
+  const BALL_R           = 16;
   const SUBSTEPS         = 3;       // physics sub-steps per render frame
+  const BALLS_PER_TEAM   = 5;       // 5 YES + 5 NO marbles in each race
 
   const COLORS = {
     bg:        '#03040a',
     bg_far:    '#08091a',
-    cyan:      '#29f7ff',
-    magenta:   '#ff3df0',
-    wallCyan:  'rgba(41, 247, 255, 0.55)',
-    wallMag:   'rgba(255, 61, 240, 0.55)',
-    finish:    '#ffd84a'
+    cyan:      '#33d7ff',     // course theme - walls / pegs / arms
+    magenta:   '#9b7cff',     // course theme - walls / pegs / arms
+    finish:    '#ffd84a',
+    yesBall:   '#3dff8a',     // marbles - green
+    noBall:    '#ff4660'      // marbles - red
   };
 
   // ───────────────────────────── State
@@ -100,6 +104,7 @@
   let cameraTargetY= 0;
   let mode         = 'idle'; // 'idle' | 'racing' | 'finishing' | 'done'
   let winner       = null;
+  let winnerBall   = null;
   let winnerMarginPx = 0;
   let raceStart    = 0;
   let raceElapsed  = 0;
@@ -279,10 +284,11 @@
   //   ●   ●   ●        (row of 3, offset)
   //     ●   ●          (row of 2)
   function buildHexSpinners(y0) {
-    const armLen = 82;
-    const thick  = 14;
-    // Vertical spacing between rows so adjacent crosses just barely miss.
-    const rowGap = 280;
+    const armLen = 102;
+    const thick  = 18;
+    // Tight hex spacing: adjacent crosses nearly touch, but leave
+    // ball-sized gaps that can open and close as the arms rotate.
+    const rowGap = 210;
     const xL = W * 0.30, xR = W * 0.70;
     const xA = W * 0.16, xB = W * 0.50, xC = W * 0.84;
     const y1 = y0 + 150;
@@ -368,7 +374,7 @@
     sctx.fillRect(0, 0, W, WORLD_H);
 
     // Faint grid every 100px so vertical motion reads
-    sctx.strokeStyle = 'rgba(41, 247, 255, 0.045)';
+    sctx.strokeStyle = 'rgba(51, 215, 255, 0.045)';
     sctx.lineWidth = 1;
     for (let y = 0; y < WORLD_H; y += 100) {
       sctx.beginPath(); sctx.moveTo(0, y); sctx.lineTo(W, y); sctx.stroke();
@@ -379,7 +385,7 @@
     for (const o of staticObs) {
       if (o.kind === 'circle') {
         if (o.bumper) {
-          // Pinball bumper — amber halo + bright core + cyan/magenta ring
+          // Pinball bumper: amber halo + bright core.
           sctx.fillStyle = 'rgba(255, 216, 74, 0.18)';
           sctx.beginPath();
           sctx.arc(o.x, o.y, o.r + 8, 0, Math.PI * 2);
@@ -397,7 +403,7 @@
           sctx.arc(o.x, o.y, o.r * 0.35, 0, Math.PI * 2);
           sctx.fill();
         } else {
-          sctx.fillStyle = o.color === COLORS.magenta ? 'rgba(255,61,240,0.16)' : 'rgba(41,247,255,0.16)';
+          sctx.fillStyle = o.color === COLORS.magenta ? 'rgba(155,124,255,0.16)' : 'rgba(51,215,255,0.16)';
           sctx.beginPath();
           sctx.arc(o.x, o.y, o.r, 0, Math.PI * 2);
           sctx.fill();
@@ -510,12 +516,22 @@
       }
     }
 
+    let leaderY = 0;
+    for (const b of balls) {
+      if (b.alive && !b.finished && b.y > leaderY) leaderY = b.y;
+    }
+
     // Integrate + collide each ball
     for (const b of balls) {
       if (!b.alive || b.finished) continue;
 
       // Forces
-      b.vy += GRAVITY * dt;
+      const trailing = Math.max(0, leaderY - b.y);
+      const comeback = Math.min(
+        COMEBACK_GRAVITY_BOOST,
+        (trailing / COMEBACK_DISTANCE) * COMEBACK_GRAVITY_BOOST
+      );
+      b.vy += GRAVITY * (LEAD_GRAVITY_SCALE + comeback) * dt;
       if (b.vy > TERMINAL_VY) b.vy = TERMINAL_VY;
       b.vx *= Math.pow(AIR_DRAG_X, dt);
       b.vy *= Math.pow(AIR_DRAG_Y, dt);
@@ -652,10 +668,14 @@
         b.finishedAt = raceElapsed;
         if (winner === null) {
           winner = b.label;
-          // Snapshot the trailing marble's y at the moment of crossing — that's
-          // the real margin of victory in pixels.
-          const other = balls.find(x => x !== b);
-          winnerMarginPx = other ? Math.max(0, Math.round(FINISH_Y - other.y)) : 0;
+          winnerBall = b;
+          // Margin = how far back is the SECOND-place marble (could be either team).
+          let secondY = 0;
+          for (const other of balls) {
+            if (other === b) continue;
+            if (other.y > secondY) secondY = other.y;
+          }
+          winnerMarginPx = Math.max(0, Math.round(FINISH_Y - secondY));
           mode = 'finishing';
           finishDelay = 1.0;       // sec of hold before result reveal
           chord(b.label === 'yes' ? [392, 494, 587, 784] : [330, 261, 196, 165], 480, 'sawtooth');
@@ -663,23 +683,29 @@
       }
     }
 
-    // Ball-ball soft contact (gives them a chance to bump and trade lead)
-    if (balls.length === 2 && balls[0].alive && balls[1].alive) {
-      const a = balls[0], c = balls[1];
-      const dx = c.x - a.x, dy = c.y - a.y;
-      const d2 = dx * dx + dy * dy;
-      const minD = a.r + c.r;
-      if (d2 < minD * minD && d2 > 0.0001) {
-        const d = Math.sqrt(d2);
-        const nx = dx / d, ny = dy / d;
-        const overlap = minD - d;
-        a.x -= nx * overlap * 0.5; a.y -= ny * overlap * 0.5;
-        c.x += nx * overlap * 0.5; c.y += ny * overlap * 0.5;
-        const va = a.vx * nx + a.vy * ny;
-        const vc = c.vx * nx + c.vy * ny;
-        const dv = vc - va;
-        a.vx += dv * nx * 0.7; a.vy += dv * ny * 0.7;
-        c.vx -= dv * nx * 0.7; c.vy -= dv * ny * 0.7;
+    // Ball-ball soft contact for all pairs — with 10 marbles, cluster
+    // dynamics matter and the trailing pack can shove the leader.
+    for (let i = 0; i < balls.length; i++) {
+      const a = balls[i];
+      if (!a.alive) continue;
+      for (let j = i + 1; j < balls.length; j++) {
+        const c = balls[j];
+        if (!c.alive) continue;
+        const dx = c.x - a.x, dy = c.y - a.y;
+        const d2 = dx * dx + dy * dy;
+        const minD = a.r + c.r;
+        if (d2 < minD * minD && d2 > 0.0001) {
+          const d = Math.sqrt(d2);
+          const nx = dx / d, ny = dy / d;
+          const overlap = minD - d;
+          a.x -= nx * overlap * 0.5; a.y -= ny * overlap * 0.5;
+          c.x += nx * overlap * 0.5; c.y += ny * overlap * 0.5;
+          const va = a.vx * nx + a.vy * ny;
+          const vc = c.vx * nx + c.vy * ny;
+          const dv = vc - va;
+          a.vx += dv * nx * 0.7; a.vy += dv * ny * 0.7;
+          c.vx -= dv * nx * 0.7; c.vy -= dv * ny * 0.7;
+        }
       }
     }
 
@@ -696,11 +722,11 @@
 
   // ───────────────────────────── Camera
   function updateCamera(dt) {
-    // Follow the leader (greatest y). If the race is over, stay on the winner.
+    // Follow the leader (greatest y). After the winner crosses, lock onto
+    // the exact marble that won.
     let leadY = 0;
-    if (winner) {
-      const b = balls.find(b => b.label === winner);
-      leadY = b ? b.y : leadY;
+    if (winner && winnerBall) {
+      leadY = winnerBall.y;
     } else {
       for (const b of balls) if (b.y > leadY) leadY = b.y;
     }
@@ -851,12 +877,17 @@
     ctx.beginPath();
     ctx.arc(b.x - b.r * 0.35, b.y - b.r * 0.35, b.r * 0.32, 0, Math.PI * 2);
     ctx.fill();
-    // letter
+    ctx.strokeStyle = 'rgba(2,3,10,0.82)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, b.r - 2, 0, Math.PI * 2);
+    ctx.stroke();
+    // team label
     ctx.fillStyle = COLORS.bg;
-    ctx.font = 'bold 12px "Courier New", monospace';
+    ctx.font = 'bold 9px "Courier New", monospace';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(b.label === 'yes' ? 'Y' : 'N', b.x, b.y + 1);
+    ctx.fillText(b.label === 'yes' ? 'YES' : 'NO', b.x, b.y + 1);
     ctx.restore();
   }
 
@@ -884,8 +915,12 @@
     let leadLabel;
     if (winner) leadLabel = winner;
     else {
-      const [a, b] = balls;
-      leadLabel = a.y >= b.y ? a.label : b.label;
+      let leader = null;
+      for (const b of balls) {
+        if (!b.alive || b.finished) continue;
+        if (!leader || b.y > leader.y) leader = b;
+      }
+      leadLabel = leader ? leader.label : null;
     }
     scoreYes.classList.toggle('lead', leadLabel === 'yes');
     scoreNo.classList.toggle('lead',  leadLabel === 'no');
@@ -893,23 +928,32 @@
 
   // ───────────────────────────── Lifecycle
   function spawnBalls() {
-    const startY = 70;
-    balls = [
-      {
-        label: 'yes', color: COLORS.cyan,
-        x: W * 0.40 + rrange(-6, 6), y: startY,
-        vx: rrange(-0.4, 0.4), vy: 0,
-        r: BALL_R, alive: true, finished: false,
-        trail: [], _cooldown: 0
-      },
-      {
-        label: 'no',  color: COLORS.magenta,
-        x: W * 0.60 + rrange(-6, 6), y: startY,
-        vx: rrange(-0.4, 0.4), vy: 0,
-        r: BALL_R, alive: true, finished: false,
-        trail: [], _cooldown: 0
+    balls = [];
+    // 5 YES + 5 NO arranged 2 rows × 5 cols, alternating teams per cell so
+    // neither team has spatial advantage at the start funnel.
+    const cols = BALLS_PER_TEAM;
+    const xStart = W * 0.30;
+    const xEnd   = W * 0.70;
+    for (let row = 0; row < 2; row++) {
+      const yy = 36 + row * (BALL_R * 2 + 6);
+      for (let col = 0; col < cols; col++) {
+        const isYes = ((row + col) % 2 === 0);
+        const x0 = xStart + (xEnd - xStart) * (col / (cols - 1));
+        balls.push({
+          label: isYes ? 'yes' : 'no',
+          color: isYes ? COLORS.yesBall : COLORS.noBall,
+          x: x0 + rrange(-3, 3),
+          y: yy,
+          vx: rrange(-0.25, 0.25),
+          vy: 0,
+          r: BALL_R,
+          alive: true,
+          finished: false,
+          trail: [],
+          _cooldown: 0
+        });
       }
-    ];
+    }
   }
 
   function startRace(seed) {
