@@ -62,20 +62,20 @@
   const choice = (arr) => arr[Math.floor(rand() * arr.length)];
 
   // ───────────────────────────── World constants
-  const SECTION_H        = 700;     // px tall per generated section
-  const SECTION_COUNT    = 8;       // ≈ 5600 px course
-  const START_PAD        = 220;     // free-fall pad above first section
-  const FINISH_PAD       = 360;     // funnel + finish band below last section
-  const WORLD_H          = START_PAD + SECTION_H * SECTION_COUNT + FINISH_PAD;
-  const FINISH_Y         = START_PAD + SECTION_H * SECTION_COUNT + 60;
+  // Hand-designed course — one fixed layout that varies per-seed only through
+  // spinner phases and start-impulse jitter.
+  const WORLD_H   = 3120;
+  const FINISH_Y  = 2960;
 
-  // Tuned for a 15s–90s race with lots of variance. Free rolling on ramps,
-  // restitution absorbs collision energy; no per-contact velocity drain.
-  const GRAVITY          = 0.50;    // px / frame² (60fps reference)
-  const AIR_DRAG_X       = 0.997;
-  const AIR_DRAG_Y       = 0.9994;
-  const TERMINAL_VY      = 11.5;
-  const RESTITUTION      = 0.42;
+  // Physics — tuned to feel like a marble race: bouncy contacts, free
+  // rolling on ramps, no per-contact velocity drain. Pinball bumpers use
+  // their own much-higher per-obstacle restitution.
+  const GRAVITY          = 0.38;    // px / frame² (60fps reference)
+  const AIR_DRAG_X       = 0.996;
+  const AIR_DRAG_Y       = 0.9992;
+  const TERMINAL_VY      = 8.4;
+  const RESTITUTION      = 0.62;    // default for walls/pegs/pads
+  const BUMPER_RESTITUTION = 0.94;  // pinball-style bumpers
   const BALL_R           = 14;
   const SUBSTEPS         = 3;       // physics sub-steps per render frame
 
@@ -181,20 +181,14 @@
     pushStaticSegment(20, 0, 20, WORLD_H, 4, COLORS.cyan);
     pushStaticSegment(W - 20, 0, W - 20, WORLD_H, 4, COLORS.magenta);
 
-    // Sections
-    const templates = ['pegfield', 'bigWheel', 'cascade', 'hammers', 'cross', 'gauntlet', 'gearPair'];
-    let lastTemplate = null;
-    for (let s = 0; s < SECTION_COUNT; s++) {
-      const y0 = START_PAD + s * SECTION_H;
-      let pick;
-      // avoid repeating the same template back-to-back
-      do { pick = choice(templates); } while (pick === lastTemplate);
-      lastTemplate = pick;
-      buildSection(pick, y0);
-    }
-
-    // Finish band: gentle funnel into the finish line
-    buildFinishBand(START_PAD + SECTION_COUNT * SECTION_H);
+    // Hand-designed sequence. Y coords laid out top-to-bottom.
+    buildStartFunnel(0);            //   0 — 240   one-marble-at-a-time bottleneck
+    buildAngledRails(240);          // 240 — 480   two angled rails (deliberately spare)
+    buildPlinkoTwinFunnel(480);     // 480 — 1060  plinko into two adjacent funnels
+    buildHexSpinners(1060);         // 1060 — 1980 hex tiling of 7 giant X rotors
+    buildGateChannels(1980);        // 1980 — 2300 dividers + moving-hole gate
+    buildPinballField(2300);        // 2300 — 2780 wall of bouncy circular bumpers
+    buildFinishFunnel(2780);        // 2780 — 2980 final funnel to finish
 
     // Build spatial buckets
     bucketsH = 120;
@@ -211,9 +205,9 @@
       else if (o.kind === 'segment')  insert(o, Math.min(o.y1, o.y2) - 2, Math.max(o.y1, o.y2) + 2);
     }
     for (const o of kinObs) {
-      // worst-case bounding for moving obstacles
       if (o.kind === 'arm' || o.kind === 'gear') insert(o, o.cy - o.length - 6, o.cy + o.length + 6);
       else if (o.kind === 'hammer')              insert(o, o.cy - 8, o.cy + o.length + o.bobR + 8);
+      else if (o.kind === 'movingFloor')         insert(o, o.y - 30, o.y + 30);
     }
   }
 
@@ -224,195 +218,148 @@
     staticObs.push({ kind: 'circle', x, y, r, color });
   }
 
-  // — Section templates —
-  // Every section is built to feel dominated by one or two BIG moving pieces
-  // (or one dense field of static pieces) — never mostly empty space.
-  function buildSection(template, y0) {
-    if (template === 'pegfield')   return buildPegfield(y0);
-    if (template === 'bigWheel')   return buildBigWheel(y0);
-    if (template === 'cascade')    return buildCascade(y0);
-    if (template === 'hammers')    return buildHammers(y0);
-    if (template === 'cross')      return buildCross(y0);
-    if (template === 'gauntlet')   return buildGauntlet(y0);
-    if (template === 'gearPair')   return buildGearPair(y0);
+  // ───────────────────────────── The course
+  // Marbles spawn at the top, side-by-side. Each stage below is hand-tuned.
+
+  function pushBumper(x, y, r) {
+    // Pinball-style circle: super-bouncy + amber accent on hit.
+    staticObs.push({
+      kind: 'circle', x, y, r,
+      color: COLORS.finish,
+      bumper: true,
+      restitution: BUMPER_RESTITUTION
+    });
   }
 
-  // Dense plinko — 8 rows, tightly packed, big pegs that actually catch.
-  function buildPegfield(y0) {
-    const rows = 8;
-    const inset = 38;
+  // 1 · Shallow narrow funnel — only one marble fits through the gap at a
+  // time. Forces them to jostle right at the start.
+  function buildStartFunnel(y0) {
+    const top = y0 + 90;
+    const bot = y0 + 220;
+    const gap = 36;                    // marble diameter is 28
+    pushStaticSegment(W/2 - 110, top, W/2 - gap/2, bot, 7, COLORS.cyan);
+    pushStaticSegment(W/2 + 110, top, W/2 + gap/2, bot, 7, COLORS.magenta);
+  }
+
+  // 2 · Two angled rails — deliberately spare connector that fans the
+  // marbles outward before the plinko field below.
+  function buildAngledRails(y0) {
+    pushStaticSegment(W/2 - 40, y0 + 30,  60,     y0 + 200, 6, COLORS.cyan);
+    pushStaticSegment(W/2 + 40, y0 + 30,  W - 60, y0 + 200, 6, COLORS.magenta);
+  }
+
+  // 3 · Plinko field that drops into two side-by-side funnels.
+  function buildPlinkoTwinFunnel(y0) {
+    // Dense plinko (5 rows, 7–8 cols)
+    const rows = 5;
+    const inset = 36;
     for (let r = 0; r < rows; r++) {
       const cols = 7 + (r % 2);
       const span = W - inset * 2;
       const gap = span / (cols + 1);
       for (let c = 0; c < cols; c++) {
-        const px = inset + gap * (c + 1) + ((r % 2) ? -gap / 2 : 0) + rrange(-4, 4);
-        const py = y0 + 60 + r * 78 + rrange(-3, 3);
+        const px = inset + gap * (c + 1) + ((r % 2) ? -gap/2 : 0);
+        const py = y0 + 40 + r * 64;
         pushStaticCircle(px, py, 13, COLORS.cyan);
       }
     }
+    // Twin funnels below — split the canvas left / right with a center pin.
+    const fTop = y0 + 400;
+    const fBot = y0 + 540;
+    pushStaticSegment(50,        fTop,  W/4 - 22,    fBot, 6, COLORS.cyan);
+    pushStaticSegment(W/2 - 28,  fTop,  W/4 + 22,    fBot, 6, COLORS.cyan);
+    pushStaticSegment(W/2 + 28,  fTop,  3*W/4 - 22,  fBot, 6, COLORS.magenta);
+    pushStaticSegment(W - 50,    fTop,  3*W/4 + 22,  fBot, 6, COLORS.magenta);
+    // Center divider tip (forces a deterministic left/right split)
+    pushStaticCircle(W/2, fTop - 4, 10, '#ffd84a');
   }
 
-  // One huge multi-arm rotor (cross or T) that dominates the section.
-  // Two or three arms sharing a pivot and spinning together — they sweep
-  // across most of the canvas width.
-  function buildBigWheel(y0) {
-    const cx = W / 2 + rrange(-20, 20);
-    const cy = y0 + SECTION_H * 0.5;
-    const length = rrange(220, 280);
-    const armCount = choice([2, 3, 4]);
-    const omega = rrange(0.018, 0.034) * (rand() < 0.5 ? -1 : 1);
+  // 4 · Hex-tile arrangement of 7 giant 4-arm rotors:
+  //     ●   ●          (row of 2)
+  //   ●   ●   ●        (row of 3, offset)
+  //     ●   ●          (row of 2)
+  function buildHexSpinners(y0) {
+    const armLen = 82;
+    const thick  = 14;
+    // Vertical spacing between rows so adjacent crosses just barely miss.
+    const rowGap = 280;
+    const xL = W * 0.30, xR = W * 0.70;
+    const xA = W * 0.16, xB = W * 0.50, xC = W * 0.84;
+    const y1 = y0 + 150;
+    const y2 = y0 + 150 + rowGap;
+    const y3 = y0 + 150 + rowGap * 2;
+    // alternating direction reads as "interlocked gears"
+    spawnRotor(xL, y1, armLen, thick, COLORS.cyan,    +1);
+    spawnRotor(xR, y1, armLen, thick, COLORS.magenta, -1);
+    spawnRotor(xA, y2, armLen, thick, COLORS.magenta, -1);
+    spawnRotor(xB, y2, armLen, thick, COLORS.cyan,    +1);
+    spawnRotor(xC, y2, armLen, thick, COLORS.magenta, -1);
+    spawnRotor(xL, y3, armLen, thick, COLORS.magenta, +1);
+    spawnRotor(xR, y3, armLen, thick, COLORS.cyan,    -1);
+  }
+  function spawnRotor(cx, cy, length, thick, color, dir) {
+    const omega = dir * 0.024;
     const baseAngle = rand() * Math.PI * 2;
-    const colorOrder = rand() < 0.5
-      ? [COLORS.cyan, COLORS.magenta]
-      : [COLORS.magenta, COLORS.cyan];
-    for (let i = 0; i < armCount; i++) {
-      const offset = (i / armCount) * Math.PI * 2;
+    for (let i = 0; i < 4; i++) {
       kinObs.push({
         kind: 'arm',
         cx, cy, length, omega,
-        angle: baseAngle + offset,
-        thick: 14,
-        color: colorOrder[i % 2]
+        angle: baseAngle + i * (Math.PI / 2),
+        thick,
+        color
       });
     }
-    // Hub disc so the center isn't a gap
-    pushStaticCircle(cx, cy, 18, COLORS.cyan);
-    // Big corner bumpers around the rotor so marbles can't just glide past
-    const cornerR = 200;
-    const cornerPegR = 18;
-    for (let a = 0; a < 4; a++) {
-      const ang = Math.PI / 4 + a * Math.PI / 2;
-      const px = cx + Math.cos(ang) * cornerR;
-      const py = cy + Math.sin(ang) * cornerR;
-      if (px > 50 && px < W - 50 && py > y0 + 60 && py < y0 + SECTION_H - 60) {
-        pushStaticCircle(px, py, cornerPegR, a % 2 === 0 ? COLORS.cyan : COLORS.magenta);
+    pushStaticCircle(cx, cy, 14, color);     // hub
+  }
+
+  // 5 · Gated channels — 3 dividers split the section into 4 lanes, and a
+  //     moving hole sweeps the floor below. Marbles wait on the floor for
+  //     the hole to pass under them.
+  function buildGateChannels(y0) {
+    const dividerTop = y0 + 20;
+    const floorY = y0 + 240;
+    const dividerBot = floorY - 6;
+    for (let i = 1; i < 4; i++) {
+      const dx = (W / 4) * i;
+      pushStaticSegment(dx, dividerTop, dx, dividerBot, 4, i % 2 === 0 ? COLORS.cyan : COLORS.magenta);
+    }
+    kinObs.push({
+      kind: 'movingFloor',
+      y: floorY,
+      floorThick: 9,
+      holeWidth: 120,
+      amp: W / 2 - 90,
+      period: 3.0,
+      phase: rand() * Math.PI * 2,
+      color: COLORS.cyan
+    });
+  }
+
+  // 6 · Pinball field — non-moving circular bumpers, very bouncy.
+  function buildPinballField(y0) {
+    const placed = [];
+    const tries = 80;
+    let count = 0;
+    for (let t = 0; t < tries && count < 16; t++) {
+      const r = 16 + rand() * 18;
+      const x = 50 + r + rand() * (W - 100 - 2 * r);
+      const y = y0 + 40 + rand() * 380;
+      let ok = true;
+      for (const p of placed) {
+        if (Math.hypot(p.x - x, p.y - y) < p.r + r + 18) { ok = false; break; }
       }
+      if (ok) { pushBumper(x, y, r); placed.push({ x, y, r }); count++; }
     }
+    // A guaranteed top peg in each quadrant so the field never feels sparse
+    const guardR = 18;
+    pushBumper(W * 0.22, y0 + 30, guardR);
+    pushBumper(W * 0.78, y0 + 30, guardR);
   }
 
-  // Three-stage cascade of funnels: each narrows to a hard gap, marbles
-  // ricochet off bumpers between stages. Fills the section top-to-bottom.
-  function buildCascade(y0) {
-    const stages = 3;
-    for (let i = 0; i < stages; i++) {
-      const top    = y0 + 40 + i * (SECTION_H / stages);
-      const bottom = y0 + (i + 1) * (SECTION_H / stages) - 20;
-      const cx = W / 2 + (i % 2 === 0 ? -1 : 1) * rrange(20, 60);
-      const gap = rrange(70, 100);
-      pushStaticSegment(50,       top, cx - gap / 2, bottom, 7, COLORS.cyan);
-      pushStaticSegment(W - 50,   top, cx + gap / 2, bottom, 7, COLORS.magenta);
-      // bumpers at the throat
-      pushStaticCircle(cx - gap / 2 - 16, bottom, 11, COLORS.cyan);
-      pushStaticCircle(cx + gap / 2 + 16, bottom, 11, COLORS.magenta);
-    }
-  }
-
-  // Three big swinging hammers on alternating sides, each spanning ~40% of
-  // canvas width with heavy bobs that genuinely punch marbles around.
-  function buildHammers(y0) {
-    const hammerCount = 3;
-    for (let i = 0; i < hammerCount; i++) {
-      const side = (i % 2 === 0) ? -1 : 1;
-      const cx = W / 2 + side * (W * 0.32);
-      const cy = y0 + 110 + i * ((SECTION_H - 220) / (hammerCount - 1));
-      kinObs.push({
-        kind: 'hammer',
-        cx, cy,
-        length: rrange(170, 220),
-        bobR: rrange(28, 36),
-        baseAngle: side > 0 ? -Math.PI / 2 - 0.4 : -Math.PI / 2 + 0.4,
-        amp: 1.15 + rrange(-0.1, 0.1),
-        phase: rand() * Math.PI * 2,
-        omega: rrange(0.030, 0.050),
-        color: side > 0 ? COLORS.magenta : COLORS.cyan,
-        thick: 8
-      });
-    }
-    // A line of pegs down the middle to interfere with the swept arcs
-    for (let r = 0; r < 4; r++) {
-      pushStaticCircle(W / 2 + rrange(-12, 12), y0 + 130 + r * 160, 12, r % 2 === 0 ? COLORS.cyan : COLORS.magenta);
-    }
-  }
-
-  // X-shaped chamber: big diamond walls with a corner peg cluster on each side
-  // and a single big rotor stitched through, so marbles have to thread or get hit.
-  function buildCross(y0) {
-    const cx = W / 2;
-    const cy = y0 + SECTION_H / 2;
-    const d = 150;
-    pushStaticSegment(cx - d, cy, cx, cy - d, 6, COLORS.cyan);
-    pushStaticSegment(cx, cy - d, cx + d, cy, 6, COLORS.magenta);
-    pushStaticSegment(cx + d, cy, cx, cy + d, 6, COLORS.magenta);
-    pushStaticSegment(cx, cy + d, cx - d, cy, 6, COLORS.cyan);
-    pushStaticCircle(cx - d, cy, 14, COLORS.cyan);
-    pushStaticCircle(cx + d, cy, 14, COLORS.magenta);
-    pushStaticCircle(cx, cy - d, 14, COLORS.cyan);
-    pushStaticCircle(cx, cy + d, 14, COLORS.magenta);
-    // A big spinning bar threading through the diamond on one diagonal
-    kinObs.push({
-      kind: 'arm', cx, cy, length: 130, omega: rrange(0.025, 0.04) * (rand() < 0.5 ? -1 : 1),
-      angle: rand() * Math.PI * 2, thick: 11, color: COLORS.magenta
-    });
-    kinObs.push({
-      kind: 'arm', cx, cy, length: 130, omega: rrange(0.025, 0.04) * (rand() < 0.5 ? -1 : 1),
-      angle: rand() * Math.PI * 2 + Math.PI / 2, thick: 11, color: COLORS.cyan
-    });
-  }
-
-  // Pair of large counter-rotating gears that almost touch — marbles squeeze
-  // between them and get spun into the next section.
-  function buildGearPair(y0) {
-    const cy = y0 + SECTION_H * 0.45;
-    const r = rrange(58, 72);
-    const gap = rrange(50, 70);
-    const omega1 = rrange(0.022, 0.038);
-    const omega2 = -omega1;             // counter-rotating
-    kinObs.push({
-      kind: 'gear', cx: W / 2 - r - gap / 2, cy, r, teeth: 10, length: r,
-      angle: 0, omega: omega1, color: COLORS.cyan
-    });
-    kinObs.push({
-      kind: 'gear', cx: W / 2 + r + gap / 2, cy, r, teeth: 10, length: r,
-      angle: 0, omega: omega2, color: COLORS.magenta
-    });
-    // Funnel walls feeding marbles into the gear gap
-    pushStaticSegment(40,      y0 + 60,  W / 2 - r - gap / 2 - 24, cy - r - 8, 6, COLORS.cyan);
-    pushStaticSegment(W - 40,  y0 + 60,  W / 2 + r + gap / 2 + 24, cy - r - 8, 6, COLORS.magenta);
-    // Exit ramps below
-    pushStaticSegment(W / 2 - r - gap / 2 - 24, cy + r + 8,  60,      y0 + SECTION_H - 30, 5, COLORS.cyan);
-    pushStaticSegment(W / 2 + r + gap / 2 + 24, cy + r + 8,  W - 60,  y0 + SECTION_H - 30, 5, COLORS.magenta);
-  }
-
-  // Tight serpentine of long ledges with steep drops to encourage rolling.
-  function buildGauntlet(y0) {
-    const leftEdge = 28, rightEdge = W - 28;
-    const steps = 6;
-    for (let i = 0; i < steps; i++) {
-      const yy = y0 + 70 + i * (SECTION_H - 140) / (steps - 1);
-      const side = i % 2;
-      const len = rrange(W * 0.62, W * 0.78);
-      const tilt = rrange(35, 65);     // steeper ramps → faster rolling
-      if (side === 0) {
-        pushStaticSegment(leftEdge, yy, leftEdge + len, yy + tilt, 7, COLORS.cyan);
-      } else {
-        pushStaticSegment(rightEdge, yy, rightEdge - len, yy + tilt, 7, COLORS.magenta);
-      }
-    }
-    // a wall-bouncer peg on each tier
-    for (let i = 0; i < steps; i++) {
-      const yy = y0 + 80 + i * (SECTION_H - 140) / (steps - 1) + 50;
-      const side = i % 2 === 0 ? 1 : -1;
-      const px = side > 0 ? W - 60 : 60;
-      pushStaticCircle(px, yy, 14, side > 0 ? COLORS.magenta : COLORS.cyan);
-    }
-  }
-
-  function buildFinishBand(y0) {
-    // Two slope walls funneling everyone into the finish strip.
-    pushStaticSegment(40, y0,            W * 0.36, y0 + 200, 6, COLORS.cyan);
-    pushStaticSegment(W - 40, y0,        W * 0.64, y0 + 200, 6, COLORS.magenta);
-    // The finish line is drawn separately; collision-wise it's not solid.
+  // 7 · Final funnel into the finish line.
+  function buildFinishFunnel(y0) {
+    pushStaticSegment(40,     y0,      W/2 - 50, y0 + 170, 8, COLORS.cyan);
+    pushStaticSegment(W - 40, y0,      W/2 + 50, y0 + 170, 8, COLORS.magenta);
   }
 
   // ───────────────────────────── Prerender static layer
@@ -431,13 +378,33 @@
     sctx.lineCap = 'round';
     for (const o of staticObs) {
       if (o.kind === 'circle') {
-        sctx.fillStyle = o.color === COLORS.magenta ? 'rgba(255,61,240,0.16)' : 'rgba(41,247,255,0.16)';
-        sctx.beginPath();
-        sctx.arc(o.x, o.y, o.r, 0, Math.PI * 2);
-        sctx.fill();
-        sctx.strokeStyle = o.color;
-        sctx.lineWidth = 2;
-        sctx.stroke();
+        if (o.bumper) {
+          // Pinball bumper — amber halo + bright core + cyan/magenta ring
+          sctx.fillStyle = 'rgba(255, 216, 74, 0.18)';
+          sctx.beginPath();
+          sctx.arc(o.x, o.y, o.r + 8, 0, Math.PI * 2);
+          sctx.fill();
+          sctx.fillStyle = 'rgba(255, 216, 74, 0.42)';
+          sctx.beginPath();
+          sctx.arc(o.x, o.y, o.r, 0, Math.PI * 2);
+          sctx.fill();
+          sctx.strokeStyle = '#ffd84a';
+          sctx.lineWidth = 3;
+          sctx.stroke();
+          // Inner mark — black dot to read clearly
+          sctx.fillStyle = '#03040a';
+          sctx.beginPath();
+          sctx.arc(o.x, o.y, o.r * 0.35, 0, Math.PI * 2);
+          sctx.fill();
+        } else {
+          sctx.fillStyle = o.color === COLORS.magenta ? 'rgba(255,61,240,0.16)' : 'rgba(41,247,255,0.16)';
+          sctx.beginPath();
+          sctx.arc(o.x, o.y, o.r, 0, Math.PI * 2);
+          sctx.fill();
+          sctx.strokeStyle = o.color;
+          sctx.lineWidth = 2;
+          sctx.stroke();
+        }
       } else if (o.kind === 'segment') {
         sctx.strokeStyle = o.color;
         sctx.lineWidth = o.thick;
@@ -470,7 +437,8 @@
   }
 
   // ───────────────────────────── Collision helpers
-  function collideCircle(b, cx, cy, cr) {
+  // `rest` overrides the default restitution; bumpers pass 0.94 here.
+  function collideCircle(b, cx, cy, cr, rest) {
     const dx = b.x - cx, dy = b.y - cy;
     const d2 = dx * dx + dy * dy;
     const minD = b.r + cr;
@@ -482,13 +450,14 @@
     b.y += ny * overlap;
     const vDotN = b.vx * nx + b.vy * ny;
     if (vDotN < 0) {
-      b.vx -= (1 + RESTITUTION) * vDotN * nx;
-      b.vy -= (1 + RESTITUTION) * vDotN * ny;
+      const r = rest != null ? rest : RESTITUTION;
+      b.vx -= (1 + r) * vDotN * nx;
+      b.vy -= (1 + r) * vDotN * ny;
     }
     return true;
   }
 
-  function collideSegment(b, x1, y1, x2, y2, halfThick) {
+  function collideSegment(b, x1, y1, x2, y2, halfThick, rest) {
     const dx = x2 - x1, dy = y2 - y1;
     const segLen2 = dx * dx + dy * dy;
     if (segLen2 < 0.0001) return false;
@@ -506,8 +475,9 @@
     b.y += ny * overlap;
     const vDotN = b.vx * nx + b.vy * ny;
     if (vDotN < 0) {
-      b.vx -= (1 + RESTITUTION) * vDotN * nx;
-      b.vy -= (1 + RESTITUTION) * vDotN * ny;
+      const r = rest != null ? rest : RESTITUTION;
+      b.vx -= (1 + r) * vDotN * nx;
+      b.vy -= (1 + r) * vDotN * ny;
     }
     return true;
   }
@@ -534,6 +504,9 @@
       } else if (o.kind === 'hammer') {
         o.phase += o.omega * dt;
         o.angle = o.baseAngle + Math.sin(o.phase) * o.amp;
+      } else if (o.kind === 'movingFloor') {
+        // Period is in seconds; dt is in frame units (1 = 1/60s).
+        o.phase += (2 * Math.PI / (60 * o.period)) * dt;
       }
     }
 
@@ -563,16 +536,16 @@
         for (let oi = 0; oi < list.length; oi++) {
           const o = list[oi];
           if (o.kind === 'circle') {
-            if (collideCircle(b, o.x, o.y, o.r)) {
+            if (collideCircle(b, o.x, o.y, o.r, o.restitution)) {
               hit = true;
               if (b._cooldown <= 0) {
-                spark(b.x, b.y, b.color, 5);
-                blip(360 + rand() * 80, 60, 'square', 0.06);
-                b._cooldown = 0.08;
+                spark(b.x, b.y, o.bumper ? '#ffd84a' : b.color, o.bumper ? 9 : 5);
+                blip(o.bumper ? 520 : 360 + rand() * 80, o.bumper ? 80 : 60, 'square', o.bumper ? 0.09 : 0.06);
+                b._cooldown = o.bumper ? 0.06 : 0.08;
               }
             }
           } else if (o.kind === 'segment') {
-            if (collideSegment(b, o.x1, o.y1, o.x2, o.y2, o.thick / 2)) {
+            if (collideSegment(b, o.x1, o.y1, o.x2, o.y2, o.thick / 2, o.restitution)) {
               hit = true;
               if (b._cooldown <= 0) {
                 spark(b.x, b.y, b.color, 4);
@@ -600,7 +573,6 @@
             // gear is a circle plus teeth — approximate as a slightly bigger circle for collision
             if (collideCircle(b, o.cx, o.cy, o.r + 4)) {
               hit = true;
-              // tangential spin
               const dx = b.x - o.cx, dy = b.y - o.cy;
               const dlen = Math.hypot(dx, dy) || 1;
               const tx = -dy / dlen, ty = dx / dlen;
@@ -616,12 +588,9 @@
           } else if (o.kind === 'hammer') {
             const bx = o.cx + Math.cos(o.angle) * o.length;
             const by = o.cy + Math.sin(o.angle) * o.length;
-            // shaft
             collideSegment(b, o.cx, o.cy, bx, by, o.thick / 2);
-            // bob
             if (collideCircle(b, bx, by, o.bobR)) {
               hit = true;
-              // hammer head adds a hard tangential punch
               const tx = -Math.sin(o.angle), ty = Math.cos(o.angle);
               const kick = o.omega * o.length * o.amp * 1.4;
               b.vx += tx * kick * 0.6;
@@ -632,6 +601,33 @@
                 b._cooldown = 0.12;
               }
             }
+          } else if (o.kind === 'movingFloor') {
+            // Horizontal floor at y=o.y with a moving gap. Collision is two
+            // segments: 20..holeStart and holeEnd..W-20.
+            const hc = W / 2 + o.amp * Math.sin(o.phase);
+            const hs = hc - o.holeWidth / 2;
+            const he = hc + o.holeWidth / 2;
+            const ht = o.floorThick / 2;
+            if (b.x < hs) {
+              if (collideSegment(b, 20, o.y, hs, o.y, ht)) {
+                hit = true;
+                if (b._cooldown <= 0) {
+                  spark(b.x, b.y, o.color, 4);
+                  blip(220, 80, 'sawtooth', 0.05);
+                  b._cooldown = 0.08;
+                }
+              }
+            } else if (b.x > he) {
+              if (collideSegment(b, he, o.y, W - 20, o.y, ht)) {
+                hit = true;
+                if (b._cooldown <= 0) {
+                  spark(b.x, b.y, o.color, 4);
+                  blip(220, 80, 'sawtooth', 0.05);
+                  b._cooldown = 0.08;
+                }
+              }
+            }
+            // ball within hole range falls through, no collision
           }
         }
       }
@@ -815,11 +811,28 @@
       ctx.beginPath(); ctx.arc(bx, by, o.bobR, 0, Math.PI * 2); ctx.fill();
       ctx.fillStyle = COLORS.bg;
       ctx.beginPath(); ctx.arc(bx, by, o.bobR * 0.45, 0, Math.PI * 2); ctx.fill();
-      // pivot
       ctx.fillStyle = COLORS.bg;
       ctx.beginPath(); ctx.arc(o.cx, o.cy, 5, 0, Math.PI * 2); ctx.fill();
       ctx.strokeStyle = COLORS.cyan; ctx.lineWidth = 1.5;
       ctx.beginPath(); ctx.arc(o.cx, o.cy, 5, 0, Math.PI * 2); ctx.stroke();
+    } else if (o.kind === 'movingFloor') {
+      const hc = W / 2 + o.amp * Math.sin(o.phase);
+      const hs = hc - o.holeWidth / 2;
+      const he = hc + o.holeWidth / 2;
+      ctx.strokeStyle = o.color;
+      ctx.lineWidth = o.floorThick;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(20, o.y); ctx.lineTo(hs, o.y);
+      ctx.moveTo(he, o.y); ctx.lineTo(W - 20, o.y);
+      ctx.stroke();
+      // Yellow accent at the hole edges so the gate is readable
+      ctx.strokeStyle = COLORS.finish;
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.moveTo(hs, o.y - 11); ctx.lineTo(hs, o.y + 11);
+      ctx.moveTo(he, o.y - 11); ctx.lineTo(he, o.y + 11);
+      ctx.stroke();
     }
   }
 
