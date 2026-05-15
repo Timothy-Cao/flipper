@@ -40,6 +40,34 @@
   const fatal     = document.getElementById('fatal');
   const exploreBtn = document.getElementById('explore');
 
+  const placeholders = [
+    'Should I do 10 pushups right now?',
+    'Should I text my crush?',
+    'Should I call a random friend?',
+    'Should I go for a walk outside?',
+    'Should I finally start that project?',
+    'Should I learn a new recipe tonight?',
+    'Should I compliment a stranger today?',
+    'Should I sign up for that class?',
+    'Should I try cold showers for a week?',
+    'Should I read a book instead of scrolling?',
+    'Should I ask for that raise?',
+    'Should I plan a spontaneous trip?',
+    'Should I write a letter to someone I miss?',
+    'Should I wake up early tomorrow?',
+    'Should I delete social media for a week?',
+    'Should I donate to that cause?',
+    'Should I say yes to the next invite?',
+    'Should I forgive them?',
+  ];
+  let phIdx = Math.random() * placeholders.length | 0;
+  qInput.placeholder = placeholders[phIdx];
+  setInterval(() => {
+    if (qInput.value) return;
+    phIdx = (phIdx + 1) % placeholders.length;
+    qInput.placeholder = placeholders[phIdx];
+  }, 4000);
+
   const W = canvas.width, H_VIEW = canvas.height;     // logical dimensions
   function syncDpr() {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
