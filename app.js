@@ -245,7 +245,6 @@
     staticObs.push({ kind: 'circle', x, y, r, color });
   }
   function pushSectionLabel(text, y) {
-    staticObs.push({ kind: 'label', text, x: W / 2, y });
   }
   function pushPlinkoPeg(x, y, r, color) {
     staticObs.push({
