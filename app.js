@@ -412,7 +412,7 @@
       side,
       cx: wallX,
       cy: y,
-      length: 74,
+      length: 89,
       thick: 13,
       baseAngle: base,
       swing,
@@ -1360,7 +1360,21 @@
   window.addEventListener('keydown', (e) => {
     const inField = e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA');
     if (inField) return;
-    if (e.key === ' ' || e.key === 'f' || e.key === 'F') {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      if (mode === 'racing' || mode === 'finishing' || mode === 'done') {
+        mode = 'idle';
+        winner = null;
+        winnerBall = null;
+        finishFxStart = 0;
+        balls = [];
+        particles = [];
+        result.classList.add('hidden');
+        hud.classList.add('hidden');
+        menu.classList.remove('hidden');
+        qInput.focus();
+      }
+    } else if (e.key === ' ' || e.key === 'f' || e.key === 'F') {
       e.preventDefault();
       if (mode === 'idle')      flipBtn.click();
       else if (mode === 'done') { againBtn.click(); setTimeout(() => flipBtn.click(), 50); }
