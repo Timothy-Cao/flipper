@@ -422,16 +422,13 @@
     pushBumper(W-20,  y0 + 70,  28);
     pushBumper(20,    y0 + 200, 24);
     pushBumper(W-20,  y0 + 200, 24);
-    pushBumper(20,    y0 + 330, 28);
-    pushBumper(W-20,  y0 + 330, 28);
     // Interior rows — offsets from center
     const rows = [
       { y: y0 + 55,  xs: [-220, -110, 0, 110, 220],        rs: [26, 16, 22, 16, 26] },
       { y: y0 + 130, xs: [-275, -165, -55, 55, 165, 275],  rs: [14, 22, 18, 18, 22, 14] },
       { y: y0 + 210, xs: [-220, -110, 0, 110, 220],        rs: [18, 28, 14, 28, 18] },
       { y: y0 + 295, xs: [-275, -165, -55, 55, 165, 275],  rs: [20, 16, 24, 24, 16, 20] },
-      { y: y0 + 380, xs: [-220, -110, 0, 110, 220],        rs: [22, 14, 26, 14, 22] },
-      { y: y0 + 440, xs: [-290, 290],                      rs: [16, 16] },
+      { y: y0 + 380, xs: [-110, 0, 110],                    rs: [14, 26, 14] },
     ];
     for (const row of rows) {
       for (let i = 0; i < row.xs.length; i++) {
@@ -519,26 +516,52 @@
     sctx.fillStyle = COLORS.bg;
     sctx.fillRect(0, 0, W, WORLD_H);
 
-    // Faint grid every 100px so vertical motion reads
-    sctx.strokeStyle = 'rgba(51, 215, 255, 0.045)';
+    // Subtle vertical gradient bands for depth
+    const bgGrad = sctx.createLinearGradient(0, 0, 0, WORLD_H);
+    bgGrad.addColorStop(0, 'rgba(51, 215, 255, 0.02)');
+    bgGrad.addColorStop(0.3, 'rgba(0, 0, 0, 0)');
+    bgGrad.addColorStop(0.5, 'rgba(155, 124, 255, 0.015)');
+    bgGrad.addColorStop(0.7, 'rgba(0, 0, 0, 0)');
+    bgGrad.addColorStop(1, 'rgba(255, 216, 74, 0.02)');
+    sctx.fillStyle = bgGrad;
+    sctx.fillRect(0, 0, W, WORLD_H);
+
+    // Faint grid — horizontal + vertical for depth
+    sctx.strokeStyle = 'rgba(51, 215, 255, 0.035)';
     sctx.lineWidth = 1;
     for (let y = 0; y < WORLD_H; y += 100) {
       sctx.beginPath(); sctx.moveTo(0, y); sctx.lineTo(W, y); sctx.stroke();
+    }
+    sctx.strokeStyle = 'rgba(51, 215, 255, 0.02)';
+    for (let x = 0; x < W; x += 100) {
+      sctx.beginPath(); sctx.moveTo(x, 0); sctx.lineTo(x, WORLD_H); sctx.stroke();
     }
 
     // Static obstacles
     sctx.lineCap = 'round';
     for (const o of staticObs) {
       if (o.kind === 'circle') {
-        {
-          sctx.fillStyle = o.color === COLORS.magenta ? 'rgba(155,124,255,0.16)' : 'rgba(51,215,255,0.16)';
-          sctx.beginPath();
-          sctx.arc(o.x, o.y, o.r, 0, Math.PI * 2);
-          sctx.fill();
-          sctx.strokeStyle = o.color;
-          sctx.lineWidth = 2;
-          sctx.stroke();
+        sctx.save();
+        // Radial gradient fill for 3D depth
+        const pg = sctx.createRadialGradient(
+          o.x - o.r * 0.3, o.y - o.r * 0.3, o.r * 0.1,
+          o.x, o.y, o.r
+        );
+        if (o.color === COLORS.magenta) {
+          pg.addColorStop(0, 'rgba(180, 155, 255, 0.3)');
+          pg.addColorStop(1, 'rgba(155, 124, 255, 0.08)');
+        } else {
+          pg.addColorStop(0, 'rgba(80, 230, 255, 0.3)');
+          pg.addColorStop(1, 'rgba(51, 215, 255, 0.08)');
         }
+        sctx.fillStyle = pg;
+        sctx.beginPath();
+        sctx.arc(o.x, o.y, o.r, 0, Math.PI * 2);
+        sctx.fill();
+        sctx.strokeStyle = o.color;
+        sctx.lineWidth = 2;
+        sctx.stroke();
+        sctx.restore();
       } else if (o.kind === 'segment') {
         sctx.lineCap = o.cap || 'round';
         sctx.strokeStyle = o.color;
@@ -551,10 +574,17 @@
         sctx.font = 'bold 11px "Courier New", monospace';
         sctx.textAlign = 'center';
         sctx.textBaseline = 'middle';
-        sctx.letterSpacing = '0px';
-        sctx.fillStyle = 'rgba(216,232,255,0.42)';
+        // Subtle line behind label
+        const tw = sctx.measureText(o.text).width;
+        sctx.strokeStyle = 'rgba(51, 215, 255, 0.08)';
+        sctx.lineWidth = 1;
+        sctx.beginPath();
+        sctx.moveTo(o.x - tw / 2 - 20, o.y);
+        sctx.lineTo(o.x + tw / 2 + 20, o.y);
+        sctx.stroke();
+        sctx.fillStyle = 'rgba(216,232,255,0.5)';
         sctx.shadowColor = COLORS.cyan;
-        sctx.shadowBlur = 8;
+        sctx.shadowBlur = 10;
         sctx.fillText(o.text, o.x, o.y);
         sctx.restore();
       }
@@ -562,24 +592,29 @@
 
     // Finish line band
     const fy = FINISH_Y;
-    const grad = sctx.createLinearGradient(0, fy - 6, 0, fy + 70);
+    const grad = sctx.createLinearGradient(0, fy - 10, 0, fy + 80);
     grad.addColorStop(0, 'rgba(255, 216, 74, 0.0)');
-    grad.addColorStop(0.4, 'rgba(255, 216, 74, 0.35)');
+    grad.addColorStop(0.3, 'rgba(255, 216, 74, 0.25)');
+    grad.addColorStop(0.5, 'rgba(255, 216, 74, 0.4)');
     grad.addColorStop(1, 'rgba(255, 216, 74, 0.0)');
     sctx.fillStyle = grad;
-    sctx.fillRect(0, fy - 6, W, 76);
+    sctx.fillRect(0, fy - 10, W, 90);
     // Checker bands
     sctx.fillStyle = COLORS.finish;
-    const stripe = 20;
+    const stripe = 16;
     for (let x = 0; x < W; x += stripe) {
-      sctx.fillRect(x, fy, stripe / 2, 4);
-      sctx.fillRect(x + stripe / 2, fy + 8, stripe / 2, 4);
+      sctx.fillRect(x, fy, stripe / 2, 3);
+      sctx.fillRect(x + stripe / 2, fy + 6, stripe / 2, 3);
     }
-    // Label
-    sctx.font = 'bold 22px "Courier New", monospace';
+    // Finish label with glow
+    sctx.save();
+    sctx.font = 'bold 20px "Courier New", monospace';
     sctx.fillStyle = COLORS.finish;
     sctx.textAlign = 'center';
-    sctx.fillText('FINISH', W / 2, fy + 44);
+    sctx.shadowColor = COLORS.finish;
+    sctx.shadowBlur = 16;
+    sctx.fillText('FINISH', W / 2, fy + 38);
+    sctx.restore();
   }
 
   // ───────────────────────────── Collision helpers
@@ -1143,32 +1178,40 @@
     if (o.kind === 'arm') {
       const ex = o.cx + Math.cos(o.angle) * o.length;
       const ey = o.cy + Math.sin(o.angle) * o.length;
+      ctx.save();
       ctx.strokeStyle = o.color;
       ctx.lineWidth = o.thick;
       ctx.lineCap = 'round';
+      ctx.shadowColor = o.color;
+      ctx.shadowBlur = 10;
       ctx.beginPath();
       ctx.moveTo(o.cx, o.cy); ctx.lineTo(ex, ey);
       ctx.stroke();
-      ctx.fillStyle = COLORS.bg;
-      ctx.beginPath(); ctx.arc(o.cx, o.cy, 5, 0, Math.PI * 2); ctx.fill();
-      ctx.strokeStyle = COLORS.cyan; ctx.lineWidth = 1.5;
-      ctx.beginPath(); ctx.arc(o.cx, o.cy, 5, 0, Math.PI * 2); ctx.stroke();
+      ctx.restore();
     } else if (o.kind === 'wallFlipper') {
       const ex = o.cx + Math.cos(o.angle) * o.length;
       const ey = o.cy + Math.sin(o.angle) * o.length;
-      ctx.strokeStyle = o.color;
+      ctx.save();
+      // Tapered flipper — gradient along length
+      const fg = ctx.createLinearGradient(o.cx, o.cy, ex, ey);
+      fg.addColorStop(0, o.color);
+      fg.addColorStop(1, o.color === COLORS.cyan ? 'rgba(51, 215, 255, 0.5)' : 'rgba(155, 124, 255, 0.5)');
+      ctx.strokeStyle = fg;
       ctx.lineWidth = o.thick + o.active * 3;
       ctx.lineCap = 'round';
       ctx.shadowColor = o.color;
-      ctx.shadowBlur = 6 + o.active * 10;
+      ctx.shadowBlur = 8 + o.active * 14;
       ctx.beginPath();
       ctx.moveTo(o.cx, o.cy); ctx.lineTo(ex, ey);
       ctx.stroke();
+      // Pivot — matching team color ring
       ctx.shadowBlur = 0;
       ctx.fillStyle = COLORS.bg;
-      ctx.beginPath(); ctx.arc(o.cx, o.cy, 7, 0, Math.PI * 2); ctx.fill();
-      ctx.strokeStyle = COLORS.finish; ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.arc(o.cx, o.cy, 7, 0, Math.PI * 2); ctx.stroke();
+      ctx.beginPath(); ctx.arc(o.cx, o.cy, 6, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = o.color; ctx.lineWidth = 2;
+      ctx.shadowColor = o.color; ctx.shadowBlur = 6;
+      ctx.beginPath(); ctx.arc(o.cx, o.cy, 6, 0, Math.PI * 2); ctx.stroke();
+      ctx.restore();
     } else if (o.kind === 'gear') {
       ctx.save();
       ctx.translate(o.cx, o.cy);
@@ -1259,12 +1302,19 @@
     } else if (o.kind === 'breakPlatform') {
       if (o.broken) return;
       ctx.save();
-      ctx.strokeStyle = COLORS.finish;
+      // Glass shimmer gradient
+      const gx1 = o.x1, gx2 = o.x2;
+      const gg = ctx.createLinearGradient(gx1, o.y, gx2, o.y);
+      gg.addColorStop(0, 'rgba(174, 244, 255, 0.3)');
+      gg.addColorStop(0.3, 'rgba(220, 250, 255, 0.7)');
+      gg.addColorStop(0.5, 'rgba(255, 255, 255, 0.85)');
+      gg.addColorStop(0.7, 'rgba(220, 250, 255, 0.7)');
+      gg.addColorStop(1, 'rgba(174, 244, 255, 0.3)');
+      ctx.strokeStyle = gg;
       ctx.lineWidth = o.thick;
       ctx.lineCap = 'round';
-      ctx.globalAlpha = 0.7;
-      ctx.shadowColor = COLORS.finish;
-      ctx.shadowBlur = 6;
+      ctx.shadowColor = 'rgba(174, 244, 255, 0.6)';
+      ctx.shadowBlur = 8;
       ctx.beginPath();
       ctx.moveTo(o.x1, o.y);
       ctx.lineTo(o.x2, o.y);
@@ -1276,6 +1326,16 @@
       const drawR = o.baseR + h * 6;
       const g = Math.round(216 + h * 39);
       const bl = Math.round(74 + h * 180);
+      // Clip wall-hugging bumpers so only the inner half shows
+      if (o.cx < 38) {
+        ctx.beginPath();
+        ctx.rect(38, o.cy - drawR - 30, W, drawR * 2 + 60);
+        ctx.clip();
+      } else if (o.cx > W - 38) {
+        ctx.beginPath();
+        ctx.rect(0, o.cy - drawR - 30, W - 38, drawR * 2 + 60);
+        ctx.clip();
+      }
       // Outer glow
       ctx.shadowColor = `rgb(255, ${g}, ${bl})`;
       ctx.shadowBlur = 8 + h * 20;
@@ -1304,23 +1364,25 @@
     if (!b.alive) return;
     ctx.save();
     ctx.shadowColor = b.color;
-    ctx.shadowBlur = 16;
-    ctx.fillStyle = b.color;
+    ctx.shadowBlur = 18;
+    // Radial gradient for 3D sphere
+    const bg = ctx.createRadialGradient(
+      b.x - b.r * 0.3, b.y - b.r * 0.3, b.r * 0.05,
+      b.x, b.y, b.r
+    );
+    bg.addColorStop(0, '#fff');
+    bg.addColorStop(0.3, b.color);
+    bg.addColorStop(1, b.label === 'yes' ? 'rgba(20, 100, 50, 0.9)' : 'rgba(120, 20, 30, 0.9)');
+    ctx.fillStyle = bg;
     ctx.beginPath();
     ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
     ctx.fill();
     ctx.shadowBlur = 0;
-    // highlight
-    ctx.fillStyle = 'rgba(255,255,255,0.55)';
-    ctx.beginPath();
-    ctx.arc(b.x - b.r * 0.35, b.y - b.r * 0.35, b.r * 0.32, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(2,3,10,0.82)';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(b.x, b.y, b.r - 2, 0, Math.PI * 2);
+    // Crisp rim
+    ctx.strokeStyle = 'rgba(2,3,10,0.6)';
+    ctx.lineWidth = 1.5;
     ctx.stroke();
-    // team label
+    // Team label
     ctx.fillStyle = COLORS.bg;
     ctx.font = 'bold 9px "Courier New", monospace';
     ctx.textAlign = 'center';
