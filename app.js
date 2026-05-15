@@ -38,6 +38,7 @@
   const weightSlider   = document.getElementById('weightSlider');
   const weightText     = document.getElementById('weightText');
   const fatal     = document.getElementById('fatal');
+  const exploreBtn = document.getElementById('explore');
 
   const W = canvas.width, H_VIEW = canvas.height;     // logical dimensions
   function syncDpr() {
@@ -81,10 +82,10 @@
   const AIR_DRAG_X       = 0.996;
   const AIR_DRAG_Y       = 0.9994;
   const TERMINAL_VY      = 6.4;
-  const MAX_BALL_SPEED   = 11.5;    // high enough to feel wild, low enough to stay stable
+  const MAX_BALL_SPEED   = 80;
   const RESTITUTION      = 0.66;    // default for walls/pegs/pads
   const PLINKO_RESTITUTION = 0.82;  // a little livelier than rails
-  const BUMPER_RESTITUTION = 1.85;  // pinball-style bumpers, intentionally hot
+  const BUMPER_RESTITUTION = 0.92;
   const BALL_R           = 16;
   const SUBSTEPS         = 3;       // physics sub-steps per render frame
   const TOTAL_BALLS      = 10;
@@ -120,6 +121,14 @@
   let currentSeed  = 0;
   let pendingSeed  = null;
   let yesBallCount = DEFAULT_YES_BALLS;
+
+  let screenShake  = 0;
+
+  // Explore / pan mode
+  let exploring    = false;
+  let exploreCamY  = 0;
+  let dragStartY   = null;
+  let dragCamStart = 0;
 
   // ───────────────────────────── Offscreen prerender
   const staticCanvas = document.createElement('canvas');
@@ -225,6 +234,7 @@
       else if (o.kind === 'movingFloor')         insert(o, o.y - 30, o.y + 30);
       else if (o.kind === 'blackHole')           insert(o, o.cy - o.pullR - 4, o.cy + o.pullR + 4);
       else if (o.kind === 'breakPlatform')      insert(o, o.y - 20, o.y + 20);
+      else if (o.kind === 'bumper')             insert(o, o.cy - o.r - 10, o.cy + o.r + 10);
     }
   }
 
@@ -253,12 +263,13 @@
   // Marbles spawn at the top, side-by-side. Each stage below is hand-tuned.
 
   function pushBumper(x, y, r) {
-    // Pinball-style circle: super-bouncy + amber accent on hit.
-    staticObs.push({
-      kind: 'circle', x, y, r,
+    kinObs.push({
+      kind: 'bumper',
+      cx: x, cy: y, r,
+      baseR: r,
       color: COLORS.finish,
-      bumper: true,
-      restitution: BUMPER_RESTITUTION
+      restitution: BUMPER_RESTITUTION,
+      hitT: 0
     });
   }
 
@@ -401,26 +412,50 @@
     });
   }
 
-  // 6 · Pinball field — non-moving circular bumpers, very bouncy.
+  // 6 · Pinball field — symmetrical layout with varied sizes, wall bumpers,
+  //     and coverage up near the funnel mouth.
   function buildPinballField(y0) {
     pushSectionLabel('BUMPER BANK', y0 + 18);
-    const placed = [];
-    const tries = 80;
-    let count = 0;
-    for (let t = 0; t < tries && count < 16; t++) {
-      const r = 16 + rand() * 18;
-      const x = 50 + r + rand() * (W - 100 - 2 * r);
-      const y = y0 + 40 + rand() * 380;
-      let ok = true;
-      for (const p of placed) {
-        if (Math.hypot(p.x - x, p.y - y) < p.r + r + 18) { ok = false; break; }
+    const cx = W / 2;
+    // Wall-hugging half-circles along edges
+    pushBumper(20,    y0 + 70,  28);
+    pushBumper(W-20,  y0 + 70,  28);
+    pushBumper(20,    y0 + 200, 24);
+    pushBumper(W-20,  y0 + 200, 24);
+    pushBumper(20,    y0 + 330, 28);
+    pushBumper(W-20,  y0 + 330, 28);
+    // Interior rows — offsets from center
+    const rows = [
+      { y: y0 + 55,  xs: [-220, -110, 0, 110, 220],        rs: [26, 16, 22, 16, 26] },
+      { y: y0 + 130, xs: [-275, -165, -55, 55, 165, 275],  rs: [14, 22, 18, 18, 22, 14] },
+      { y: y0 + 210, xs: [-220, -110, 0, 110, 220],        rs: [18, 28, 14, 28, 18] },
+      { y: y0 + 295, xs: [-275, -165, -55, 55, 165, 275],  rs: [20, 16, 24, 24, 16, 20] },
+      { y: y0 + 380, xs: [-220, -110, 0, 110, 220],        rs: [22, 14, 26, 14, 22] },
+      { y: y0 + 440, xs: [-290, 290],                      rs: [16, 16] },
+    ];
+    for (const row of rows) {
+      for (let i = 0; i < row.xs.length; i++) {
+        const bx = cx + row.xs[i];
+        if (bx > 40 && bx < W - 40) pushBumper(bx, row.y, row.rs[i]);
       }
-      if (ok) { pushBumper(x, y, r); placed.push({ x, y, r }); count++; }
     }
-    // A guaranteed top peg in each quadrant so the field never feels sparse
-    const guardR = 18;
-    pushBumper(W * 0.22, y0 + 30, guardR);
-    pushBumper(W * 0.78, y0 + 30, guardR);
+    // Shrink bumpers that are too close — balls need at least 24px gap
+    const bumpers = kinObs.filter(o => o.kind === 'bumper');
+    const minGap = 24;
+    for (let i = 0; i < bumpers.length; i++) {
+      for (let j = i + 1; j < bumpers.length; j++) {
+        const a = bumpers[i], b = bumpers[j];
+        const dx = a.cx - b.cx, dy = a.cy - b.cy;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        const gap = dist - a.r - b.r;
+        if (gap < minGap) {
+          const shrink = (minGap - gap) / 2 + 1;
+          const bigger = a.r >= b.r ? a : b;
+          bigger.r = Math.max(6, bigger.r - shrink);
+          bigger.baseR = bigger.r;
+        }
+      }
+    }
   }
 
   function spawnWallFlipper(side, y, phase) {
@@ -495,25 +530,7 @@
     sctx.lineCap = 'round';
     for (const o of staticObs) {
       if (o.kind === 'circle') {
-        if (o.bumper) {
-          // Pinball bumper: amber halo + bright core.
-          sctx.fillStyle = 'rgba(255, 216, 74, 0.18)';
-          sctx.beginPath();
-          sctx.arc(o.x, o.y, o.r + 8, 0, Math.PI * 2);
-          sctx.fill();
-          sctx.fillStyle = 'rgba(255, 216, 74, 0.42)';
-          sctx.beginPath();
-          sctx.arc(o.x, o.y, o.r, 0, Math.PI * 2);
-          sctx.fill();
-          sctx.strokeStyle = '#ffd84a';
-          sctx.lineWidth = 3;
-          sctx.stroke();
-          // Inner mark — black dot to read clearly
-          sctx.fillStyle = '#03040a';
-          sctx.beginPath();
-          sctx.arc(o.x, o.y, o.r * 0.35, 0, Math.PI * 2);
-          sctx.fill();
-        } else {
+        {
           sctx.fillStyle = o.color === COLORS.magenta ? 'rgba(155,124,255,0.16)' : 'rgba(51,215,255,0.16)';
           sctx.beginPath();
           sctx.arc(o.x, o.y, o.r, 0, Math.PI * 2);
@@ -652,6 +669,11 @@
       } else if (o.kind === 'movingFloor') {
         // Period is in seconds; dt is in frame units (1 = 1/60s).
         o.phase += (2 * Math.PI / (60 * o.period)) * dt;
+      } else if (o.kind === 'bumper') {
+        if (o.hitT > 0) {
+          o.hitT = Math.max(0, o.hitT - 0.04 * dt);
+          o.r = o.baseR + o.hitT * 6;
+        }
       } else if (o.kind === 'blackHole') {
         o.phase += (2 * Math.PI / (60 * o.period)) * dt;
         const wave = Math.sin(o.phase);
@@ -699,9 +721,9 @@
             if (collideCircle(b, o.x, o.y, o.r, o.restitution)) {
               hit = true;
               if (b._cooldown <= 0) {
-                spark(b.x, b.y, o.bumper ? '#ffd84a' : b.color, o.bumper ? 6 : 4);
-                blip(o.bumper ? 520 : 360 + rand() * 80, o.bumper ? 80 : 60, 'square', o.bumper ? 0.09 : 0.06);
-                b._cooldown = o.bumper ? 0.06 : 0.08;
+                spark(b.x, b.y, b.color, 4);
+                blip(360 + rand() * 80, 60, 'square', 0.06);
+                b._cooldown = 0.08;
               }
             }
           } else if (o.kind === 'segment') {
@@ -826,8 +848,49 @@
               if (collideSegment(b, o.x1, o.y, o.x2, o.y, o.thick / 2, o.restitution)) {
                 hit = true;
                 o.broken = true;
-                spark(b.x, b.y, COLORS.finish, 10);
-                blip(600 + rand() * 200, 100, 'square', 0.12);
+                // Glass shatter VFX — wide shard burst
+                const mx = (o.x1 + o.x2) / 2;
+                for (let si = 0; si < 30; si++) {
+                  const ang = (si / 30) * Math.PI * 2 + rand() * 0.4;
+                  const spd = 2 + rand() * 5;
+                  particles.push({
+                    x: o.x1 + rand() * (o.x2 - o.x1), y: o.y,
+                    vx: Math.cos(ang) * spd,
+                    vy: Math.sin(ang) * spd - 3,
+                    life: 0.5 + rand() * 0.6,
+                    color: rand() > 0.5 ? '#aef4ff' : '#fff'
+                  });
+                }
+                spark(mx, o.y, COLORS.finish, 10);
+                if (particles.length > 120) particles.splice(0, particles.length - 120);
+                // Layered crash sound: low thud + high shatter
+                blip(80, 200, 'sawtooth', 0.3);
+                blip(1200 + rand() * 800, 60, 'square', 0.15);
+                blip(2400 + rand() * 600, 40, 'square', 0.1);
+                screenShake = 0.3;
+                const blastR = 80;
+                const blastForce = -80;
+                for (const ob of balls) {
+                  const dy = ob.y - o.y;
+                  const dx = ob.x - (o.x1 + o.x2) / 2;
+                  const dist = Math.sqrt(dx * dx + dy * dy);
+                  if (dist < blastR) {
+                    const falloff = 1 - dist / blastR;
+                    ob.vy = blastForce * falloff;
+                    ob.vx += (rand() - 0.5) * 4;
+                  }
+                }
+                b.vy = blastForce * 0.8;
+              }
+            }
+          } else if (o.kind === 'bumper') {
+            if (collideCircle(b, o.cx, o.cy, o.r, o.restitution)) {
+              hit = true;
+              o.hitT = 1;
+              if (b._cooldown <= 0) {
+                spark(b.x, b.y, '#fff0aa', 6);
+                blip(520, 80, 'square', 0.09);
+                b._cooldown = 0.06;
               }
             }
           }
@@ -913,8 +976,10 @@
 
   // ───────────────────────────── Camera
   function updateCamera(dt) {
-    // Follow the leader (greatest y). After the winner crosses, lock onto
-    // the exact marble that won.
+    if (exploring) {
+      cameraY = exploreCamY;
+      return;
+    }
     let leadY = 0;
     if (winner && winnerBall) {
       leadY = winnerBall.y;
@@ -924,7 +989,6 @@
     cameraTargetY = leadY - H_VIEW * 0.42;
     if (cameraTargetY < 0) cameraTargetY = 0;
     if (cameraTargetY > WORLD_H - H_VIEW) cameraTargetY = WORLD_H - H_VIEW;
-    // Smooth lerp
     const k = mode === 'finishing' ? 0.06 : 0.14;
     cameraY += (cameraTargetY - cameraY) * Math.min(1, k * dt);
   }
@@ -935,8 +999,19 @@
     ctx.fillStyle = COLORS.bg;
     ctx.fillRect(0, 0, W, H_VIEW);
 
+    // Screen shake
+    let shakeX = 0, shakeY = 0;
+    if (screenShake > 0) {
+      shakeX = (Math.random() - 0.5) * screenShake * 24;
+      shakeY = (Math.random() - 0.5) * screenShake * 24;
+      screenShake *= 0.85;
+      if (screenShake < 0.01) screenShake = 0;
+    }
+
     // Blit visible slice of static prerender
     const camY = Math.max(0, Math.min(WORLD_H - H_VIEW, Math.floor(cameraY)));
+    ctx.save();
+    ctx.translate(shakeX, shakeY);
     ctx.drawImage(
       staticCanvas,
       0, camY, W, H_VIEW,
@@ -944,7 +1019,6 @@
     );
 
     // World-coord draws
-    ctx.save();
     ctx.translate(0, -camY);
 
     drawFinishGlow(camY);
@@ -1194,6 +1268,33 @@
       ctx.beginPath();
       ctx.moveTo(o.x1, o.y);
       ctx.lineTo(o.x2, o.y);
+      ctx.stroke();
+      ctx.restore();
+    } else if (o.kind === 'bumper') {
+      ctx.save();
+      const h = o.hitT || 0;
+      const drawR = o.baseR + h * 6;
+      const g = Math.round(216 + h * 39);
+      const bl = Math.round(74 + h * 180);
+      // Outer glow
+      ctx.shadowColor = `rgb(255, ${g}, ${bl})`;
+      ctx.shadowBlur = 8 + h * 20;
+      // Radial gradient — bright highlight off-center for a 3D look
+      const grad = ctx.createRadialGradient(
+        o.cx - drawR * 0.25, o.cy - drawR * 0.25, drawR * 0.1,
+        o.cx, o.cy, drawR
+      );
+      grad.addColorStop(0, `rgba(255, ${Math.min(255, g + 30)}, ${Math.min(255, bl + 60)}, 1)`);
+      grad.addColorStop(0.7, `rgb(255, ${g}, ${bl})`);
+      grad.addColorStop(1, `rgb(${Math.round(200 + h * 55)}, ${Math.round(160 + h * 40)}, ${Math.round(20 + h * 100)})`);
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(o.cx, o.cy, drawR, 0, Math.PI * 2);
+      ctx.fill();
+      // Thin bright rim
+      ctx.shadowBlur = 0;
+      ctx.strokeStyle = `rgba(255, ${Math.min(255, g + 20)}, ${Math.min(255, bl + 40)}, ${0.5 + h * 0.4})`;
+      ctx.lineWidth = 1.5;
       ctx.stroke();
       ctx.restore();
     }
@@ -1467,12 +1568,61 @@
     try { localStorage.setItem('flipper.muted', muted ? '1' : '0'); } catch (e) {}
     applyMuteUI();
   });
+
+  // ───────────────────────────── Explore mode
+  function enterExplore() {
+    if (mode !== 'idle') return;
+    exploring = true;
+    exploreCamY = cameraY;
+    menu.classList.add('hidden');
+    exploreBtn.setAttribute('aria-pressed', 'true');
+  }
+  function exitExplore() {
+    exploring = false;
+    dragStartY = null;
+    cameraY = 0;
+    cameraTargetY = 0;
+    menu.classList.remove('hidden');
+    exploreBtn.setAttribute('aria-pressed', 'false');
+  }
+  function clampExploreCam() {
+    if (exploreCamY < 0) exploreCamY = 0;
+    if (exploreCamY > WORLD_H - H_VIEW) exploreCamY = WORLD_H - H_VIEW;
+  }
+  exploreBtn.addEventListener('click', () => {
+    if (exploring) { exitExplore(); return; }
+    enterExplore();
+  });
+  canvas.addEventListener('pointerdown', (e) => {
+    if (!exploring) return;
+    dragStartY = e.clientY;
+    dragCamStart = exploreCamY;
+    canvas.setPointerCapture(e.pointerId);
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    if (!exploring || dragStartY == null) return;
+    const rect = canvas.getBoundingClientRect();
+    const scale = WORLD_H / rect.height * (H_VIEW / WORLD_H);
+    exploreCamY = dragCamStart - (e.clientY - dragStartY) * (WORLD_H / rect.height);
+    clampExploreCam();
+  });
+  canvas.addEventListener('pointerup', () => { dragStartY = null; });
+  canvas.addEventListener('pointercancel', () => { dragStartY = null; });
+  canvas.addEventListener('wheel', (e) => {
+    if (!exploring) return;
+    e.preventDefault();
+    exploreCamY += e.deltaY * 2;
+    clampExploreCam();
+  }, { passive: false });
+
   window.addEventListener('keydown', (e) => {
     const inField = e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA');
     if (inField) return;
     if (e.key === 'Escape') {
       e.preventDefault();
-      if (mode === 'racing' || mode === 'finishing' || mode === 'done') {
+      if (exploring) {
+        exitExplore();
+      } else if (mode === 'racing' || mode === 'finishing' || mode === 'done') {
         mode = 'idle';
         winner = null;
         winnerBall = null;
@@ -1484,6 +1634,9 @@
         menu.classList.remove('hidden');
         qInput.focus();
       }
+    } else if (e.key === 'v' || e.key === 'V') {
+      e.preventDefault();
+      exploreBtn.click();
     } else if (e.key === ' ' || e.key === 'f' || e.key === 'F') {
       e.preventDefault();
       if (mode === 'idle')      flipBtn.click();
