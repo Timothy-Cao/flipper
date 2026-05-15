@@ -1660,18 +1660,19 @@
 
   // ───────────────────────────── Explore mode
   function enterExplore() {
-    if (mode !== 'idle') return;
     exploring = true;
     exploreCamY = cameraY;
-    menu.classList.add('hidden');
+    if (mode === 'idle') menu.classList.add('hidden');
     exploreBtn.setAttribute('aria-pressed', 'true');
   }
   function exitExplore() {
     exploring = false;
     dragStartY = null;
-    cameraY = 0;
-    cameraTargetY = 0;
-    menu.classList.remove('hidden');
+    if (mode === 'idle') {
+      cameraY = 0;
+      cameraTargetY = 0;
+      menu.classList.remove('hidden');
+    }
     exploreBtn.setAttribute('aria-pressed', 'false');
   }
   function clampExploreCam() {
