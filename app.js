@@ -68,8 +68,8 @@
   // ───────────────────────────── World constants
   // Hand-designed course — one fixed layout that varies per-seed only through
   // spinner phases and start-impulse jitter.
-  const WORLD_H   = 3700;
-  const FINISH_Y  = 3560;
+  const WORLD_H   = 4150;
+  const FINISH_Y  = 4010;
 
   // Physics — tuned to feel like a marble race: bouncy contacts, free
   // rolling on ramps, no per-contact velocity drain. Pinball bumpers use
@@ -224,6 +224,7 @@
       else if (o.kind === 'hammer')              insert(o, o.cy - 8, o.cy + o.length + o.bobR + 8);
       else if (o.kind === 'movingFloor')         insert(o, o.y - 30, o.y + 30);
       else if (o.kind === 'blackHole')           insert(o, o.cy - o.pullR - 4, o.cy + o.pullR + 4);
+      else if (o.kind === 'breakPlatform')      insert(o, o.y - 20, o.y + 20);
     }
   }
 
@@ -443,18 +444,37 @@
     });
   }
 
-  // 7 · Long final funnel into a flipper chute, then straight into the finish.
+  // 7 · Long final funnel into a flipper chute with breakable platforms,
+  //     then pinball flippers, then straight into the finish.
   function buildFinishFunnel(y0) {
     pushSectionLabel('KICKER CHUTE', y0 + 32);
     pushStaticSegment(40,     y0,      W/2 - 120, y0 + 190, 8, COLORS.cyan);
     pushStaticSegment(W - 40, y0,      W/2 + 120, y0 + 190, 8, COLORS.magenta);
 
     const chuteTop = y0 + 190;
-    const chuteBot = y0 + 720;
+    const chuteBot = y0 + 1170;
     pushStaticSegment(W/2 - 120, chuteTop, W/2 - 120, chuteBot, 7, COLORS.cyan);
     pushStaticSegment(W/2 + 120, chuteTop, W/2 + 120, chuteBot, 7, COLORS.magenta);
 
-    const flipY = chuteTop + 280;
+    // Breakable platforms — 15 thin shelves that shatter on first hit
+    pushSectionLabel('GLASS FLOOR', chuteTop + 30);
+    const platLeft  = W / 2 - 116;
+    const platRight = W / 2 + 116;
+    for (let i = 0; i < 15; i++) {
+      const py = chuteTop + 70 + i * 32;
+      kinObs.push({
+        kind: 'breakPlatform',
+        x1: platLeft,
+        x2: platRight,
+        y: py,
+        thick: 4,
+        broken: false,
+        restitution: 1.4,
+        color: COLORS.finish
+      });
+    }
+
+    const flipY = chuteTop + 520 + 280;
     spawnWallFlipper('left',  flipY, rand() * Math.PI * 2);
     spawnWallFlipper('right', flipY, rand() * Math.PI * 2);
   }
@@ -770,7 +790,7 @@
             const ht = o.floorThick / 2;
             const edgeGrace = b.r * 0.65;
             if (b.x + edgeGrace < hs) {
-              if (collideSegment(b, 20, o.y, leftEnd, o.y, ht)) {
+              if (collideSegment(b, 20, o.y, leftEnd, o.y, ht, 1.3)) {
                 hit = true;
                 if (b._cooldown <= 0) {
                   spark(b.x, b.y, o.color, 3);
@@ -779,7 +799,7 @@
                 }
               }
             } else if (b.x - edgeGrace > he) {
-              if (collideSegment(b, rightStart, o.y, W - 20, o.y, ht)) {
+              if (collideSegment(b, rightStart, o.y, W - 20, o.y, ht, 1.3)) {
                 hit = true;
                 if (b._cooldown <= 0) {
                   spark(b.x, b.y, o.color, 3);
@@ -799,6 +819,15 @@
                 const force = o.strength * o.active * falloff * falloff * dt;
                 b.vx += (dx / d) * force;
                 b.vy += (dy / d) * force;
+              }
+            }
+          } else if (o.kind === 'breakPlatform') {
+            if (!o.broken) {
+              if (collideSegment(b, o.x1, o.y, o.x2, o.y, o.thick / 2, o.restitution)) {
+                hit = true;
+                o.broken = true;
+                spark(b.x, b.y, COLORS.finish, 10);
+                blip(600 + rand() * 200, 100, 'square', 0.12);
               }
             }
           }
@@ -923,7 +952,8 @@
     // Kinematic obstacles (only those visible)
     const yMin = camY - 40, yMax = camY + H_VIEW + 40;
     for (const o of kinObs) {
-      if (o.cy < yMin || o.cy > yMax) continue;
+      const oy = o.cy != null ? o.cy : o.y;
+      if (oy < yMin || oy > yMax) continue;
       drawKinematic(o);
     }
 
@@ -1150,6 +1180,20 @@
       ctx.shadowBlur = 4 + a * 14;
       ctx.beginPath();
       ctx.arc(o.cx, o.cy, o.visR, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    } else if (o.kind === 'breakPlatform') {
+      if (o.broken) return;
+      ctx.save();
+      ctx.strokeStyle = COLORS.finish;
+      ctx.lineWidth = o.thick;
+      ctx.lineCap = 'round';
+      ctx.globalAlpha = 0.7;
+      ctx.shadowColor = COLORS.finish;
+      ctx.shadowBlur = 6;
+      ctx.beginPath();
+      ctx.moveTo(o.x1, o.y);
+      ctx.lineTo(o.x2, o.y);
       ctx.stroke();
       ctx.restore();
     }
