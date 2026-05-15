@@ -33,6 +33,10 @@
   const againBtn  = document.getElementById('again');
   const muteBtn   = document.getElementById('mute');
   const qInput    = document.getElementById('question');
+  const settingsToggle = document.getElementById('settingsToggle');
+  const settingsPanel  = document.getElementById('settingsPanel');
+  const weightSlider   = document.getElementById('weightSlider');
+  const weightText     = document.getElementById('weightText');
   const fatal     = document.getElementById('fatal');
 
   const W = canvas.width, H_VIEW = canvas.height;     // logical dimensions
@@ -64,8 +68,8 @@
   // ───────────────────────────── World constants
   // Hand-designed course — one fixed layout that varies per-seed only through
   // spinner phases and start-impulse jitter.
-  const WORLD_H   = 3120;
-  const FINISH_Y  = 2960;
+  const WORLD_H   = 3700;
+  const FINISH_Y  = 3560;
 
   // Physics — tuned to feel like a marble race: bouncy contacts, free
   // rolling on ramps, no per-contact velocity drain. Pinball bumpers use
@@ -77,12 +81,14 @@
   const AIR_DRAG_X       = 0.996;
   const AIR_DRAG_Y       = 0.9994;
   const TERMINAL_VY      = 6.4;
+  const MAX_BALL_SPEED   = 11.5;    // high enough to feel wild, low enough to stay stable
   const RESTITUTION      = 0.66;    // default for walls/pegs/pads
   const PLINKO_RESTITUTION = 0.82;  // a little livelier than rails
   const BUMPER_RESTITUTION = 1.85;  // pinball-style bumpers, intentionally hot
   const BALL_R           = 16;
   const SUBSTEPS         = 3;       // physics sub-steps per render frame
-  const BALLS_PER_TEAM   = 5;       // 5 YES + 5 NO marbles in each race
+  const TOTAL_BALLS      = 10;
+  const DEFAULT_YES_BALLS = 5;
 
   const COLORS = {
     bg:        '#03040a',
@@ -112,6 +118,7 @@
   let finishDelay  = 0;      // counted down while finishing
   let currentSeed  = 0;
   let pendingSeed  = null;
+  let yesBallCount = DEFAULT_YES_BALLS;
 
   // ───────────────────────────── Offscreen prerender
   const staticCanvas = document.createElement('canvas');
@@ -194,7 +201,7 @@
     buildHexSpinners(1060);         // 1060 — 1980 hex tiling of 7 giant X rotors
     buildGateChannels(1980);        // 1980 — 2300 dividers + moving-hole gate
     buildPinballField(2300);        // 2300 — 2780 wall of bouncy circular bumpers
-    buildFinishFunnel(2780);        // 2780 — 2980 final funnel to finish
+    buildFinishFunnel(2780);        // 2780 — 3560 funnel, flipper chute, finish
 
     // Build spatial buckets
     bucketsH = 120;
@@ -212,16 +219,20 @@
     }
     for (const o of kinObs) {
       if (o.kind === 'arm' || o.kind === 'gear') insert(o, o.cy - o.length - 6, o.cy + o.length + 6);
+      else if (o.kind === 'wallFlipper')         insert(o, o.cy - o.length - 12, o.cy + o.length + 12);
       else if (o.kind === 'hammer')              insert(o, o.cy - 8, o.cy + o.length + o.bobR + 8);
       else if (o.kind === 'movingFloor')         insert(o, o.y - 30, o.y + 30);
     }
   }
 
-  function pushStaticSegment(x1, y1, x2, y2, thick, color) {
-    staticObs.push({ kind: 'segment', x1, y1, x2, y2, thick, color });
+  function pushStaticSegment(x1, y1, x2, y2, thick, color, cap = 'round') {
+    staticObs.push({ kind: 'segment', x1, y1, x2, y2, thick, color, cap });
   }
   function pushStaticCircle(x, y, r, color) {
     staticObs.push({ kind: 'circle', x, y, r, color });
+  }
+  function pushSectionLabel(text, y) {
+    staticObs.push({ kind: 'label', text, x: W / 2, y });
   }
   function pushPlinkoPeg(x, y, r, color) {
     staticObs.push({
@@ -251,6 +262,7 @@
   // 1 · Opening plinko. The marbles hit pegs almost immediately, so the
   // first split is chaotic instead of a queue into a bottleneck.
   function buildStartFunnel(y0) {
+    pushSectionLabel('OPENING PLINKO', y0 + 48);
     const rows = 3;
     const left = 64;
     const right = W - 64;
@@ -269,12 +281,14 @@
   // 2 · Two angled rails — deliberately spare connector that fans the
   // marbles outward before the plinko field below.
   function buildAngledRails(y0) {
+    pushSectionLabel('DRIFT RAILS', y0 + 22);
     pushStaticSegment(W/2 - 40, y0 + 30,  60,     y0 + 200, 6, COLORS.cyan);
     pushStaticSegment(W/2 + 40, y0 + 30,  W - 60, y0 + 200, 6, COLORS.magenta);
   }
 
   // 3 · Plinko field that drops into two side-by-side funnels.
   function buildPlinkoTwinFunnel(y0) {
+    pushSectionLabel('TWIN PLINKO', y0 + 18);
     // Dense plinko (7 rows, 9–10 cols)
     const rows = 7;
     const left = 62;
@@ -305,6 +319,7 @@
   //   ●   ●   ●        (row of 3, offset)
   //     ●   ●          (row of 2)
   function buildHexSpinners(y0) {
+    pushSectionLabel('ROTOR HEX', y0 + 56);
     const armLen = 102;
     const thick  = 18;
     // Tight hex spacing: adjacent crosses nearly touch, but leave
@@ -343,19 +358,22 @@
   //     moving hole sweeps the floor below. Marbles wait on the floor for
   //     the hole to pass under them.
   function buildGateChannels(y0) {
+    pushSectionLabel('TIMING BOOTHS', y0 + 10);
     const dividerTop = y0 + 20;
     const floorY = y0 + 240;
     const dividerBot = floorY - 6;
-    for (let i = 1; i < 4; i++) {
-      const dx = (W / 4) * i;
+    const lanes = 8;
+    const laneW = (W - 40) / lanes;
+    for (let i = 1; i < lanes; i++) {
+      const dx = 20 + laneW * i;
       pushStaticSegment(dx, dividerTop, dx, dividerBot, 4, i % 2 === 0 ? COLORS.cyan : COLORS.magenta);
     }
     kinObs.push({
       kind: 'movingFloor',
       y: floorY,
       floorThick: 9,
-      holeWidth: 120,
-      amp: W / 2 - 90,
+      holeWidth: laneW * 0.92,
+      amp: W / 2 - 68,
       period: 3.0,
       phase: rand() * Math.PI * 2,
       color: COLORS.cyan
@@ -364,6 +382,7 @@
 
   // 6 · Pinball field — non-moving circular bumpers, very bouncy.
   function buildPinballField(y0) {
+    pushSectionLabel('BUMPER BANK', y0 + 18);
     const placed = [];
     const tries = 80;
     let count = 0;
@@ -383,10 +402,42 @@
     pushBumper(W * 0.78, y0 + 30, guardR);
   }
 
-  // 7 · Final funnel into the finish line.
+  function spawnWallFlipper(side, y, phase) {
+    const wallX = side === 'left' ? W / 2 - 82 : W / 2 + 82;
+    const base = side === 'left' ? 0.18 : Math.PI - 0.18;
+    const swing = side === 'left' ? -1.12 : 1.12;
+    kinObs.push({
+      kind: 'wallFlipper',
+      side,
+      cx: wallX,
+      cy: y,
+      length: 74,
+      thick: 13,
+      baseAngle: base,
+      swing,
+      angle: base,
+      phase,
+      omega: 0.075 + rand() * 0.012,
+      active: 0,
+      color: side === 'left' ? COLORS.cyan : COLORS.magenta
+    });
+  }
+
+  // 7 · Long final funnel into a flipper chute, then straight into the finish.
   function buildFinishFunnel(y0) {
-    pushStaticSegment(40,     y0,      W/2 - 50, y0 + 170, 8, COLORS.cyan);
-    pushStaticSegment(W - 40, y0,      W/2 + 50, y0 + 170, 8, COLORS.magenta);
+    pushSectionLabel('KICKER CHUTE', y0 + 32);
+    pushStaticSegment(40,     y0,      W/2 - 70, y0 + 190, 8, COLORS.cyan);
+    pushStaticSegment(W - 40, y0,      W/2 + 70, y0 + 190, 8, COLORS.magenta);
+
+    const chuteTop = y0 + 178;
+    const chuteBot = y0 + 720;
+    pushStaticSegment(W/2 - 82, chuteTop, W/2 - 82, chuteBot, 7, COLORS.cyan);
+    pushStaticSegment(W/2 + 82, chuteTop, W/2 + 82, chuteBot, 7, COLORS.magenta);
+
+    for (let i = 0; i < 4; i++) {
+      const side = i % 2 === 0 ? 'left' : 'right';
+      spawnWallFlipper(side, chuteTop + 104 + i * 118, rand() * Math.PI * 2);
+    }
   }
 
   // ───────────────────────────── Prerender static layer
@@ -433,11 +484,23 @@
           sctx.stroke();
         }
       } else if (o.kind === 'segment') {
+        sctx.lineCap = o.cap || 'round';
         sctx.strokeStyle = o.color;
         sctx.lineWidth = o.thick;
         sctx.beginPath();
         sctx.moveTo(o.x1, o.y1); sctx.lineTo(o.x2, o.y2);
         sctx.stroke();
+      } else if (o.kind === 'label') {
+        sctx.save();
+        sctx.font = 'bold 11px "Courier New", monospace';
+        sctx.textAlign = 'center';
+        sctx.textBaseline = 'middle';
+        sctx.letterSpacing = '0px';
+        sctx.fillStyle = 'rgba(216,232,255,0.42)';
+        sctx.shadowColor = COLORS.cyan;
+        sctx.shadowBlur = 8;
+        sctx.fillText(o.text, o.x, o.y);
+        sctx.restore();
       }
     }
 
@@ -464,7 +527,8 @@
   }
 
   // ───────────────────────────── Collision helpers
-  // `rest` overrides the default restitution; bumpers pass 0.94 here.
+  // `rest` overrides the default restitution; bumpers and plinko pegs pass
+  // their own tuned values here.
   function collideCircle(b, cx, cy, cr, rest) {
     const dx = b.x - cx, dy = b.y - cy;
     const d2 = dx * dx + dy * dy;
@@ -519,7 +583,15 @@
         color
       });
     }
-    if (particles.length > 80) particles.splice(0, particles.length - 80);
+    if (particles.length > 48) particles.splice(0, particles.length - 48);
+  }
+
+  function clampBallSpeed(b) {
+    const speed = Math.hypot(b.vx, b.vy);
+    if (speed <= MAX_BALL_SPEED) return;
+    const k = MAX_BALL_SPEED / speed;
+    b.vx *= k;
+    b.vy *= k;
   }
 
   // ───────────────────────────── Physics step
@@ -528,6 +600,11 @@
     for (const o of kinObs) {
       if (o.kind === 'arm' || o.kind === 'gear') {
         o.angle += o.omega * dt;
+      } else if (o.kind === 'wallFlipper') {
+        o.phase += o.omega * dt;
+        const pulse = Math.max(0, Math.sin(o.phase));
+        o.active = pulse * pulse * pulse;
+        o.angle = o.baseAngle + o.swing * o.active;
       } else if (o.kind === 'hammer') {
         o.phase += o.omega * dt;
         o.angle = o.baseAngle + Math.sin(o.phase) * o.amp;
@@ -556,6 +633,7 @@
       if (b.vy > TERMINAL_VY) b.vy = TERMINAL_VY;
       b.vx *= Math.pow(AIR_DRAG_X, dt);
       b.vy *= Math.pow(AIR_DRAG_Y, dt);
+      clampBallSpeed(b);
 
       // Integrate
       b.x += b.vx * dt;
@@ -576,7 +654,7 @@
             if (collideCircle(b, o.x, o.y, o.r, o.restitution)) {
               hit = true;
               if (b._cooldown <= 0) {
-                spark(b.x, b.y, o.bumper ? '#ffd84a' : b.color, o.bumper ? 9 : 5);
+                spark(b.x, b.y, o.bumper ? '#ffd84a' : b.color, o.bumper ? 6 : 4);
                 blip(o.bumper ? 520 : 360 + rand() * 80, o.bumper ? 80 : 60, 'square', o.bumper ? 0.09 : 0.06);
                 b._cooldown = o.bumper ? 0.06 : 0.08;
               }
@@ -585,7 +663,7 @@
             if (collideSegment(b, o.x1, o.y1, o.x2, o.y2, o.thick / 2, o.restitution)) {
               hit = true;
               if (b._cooldown <= 0) {
-                spark(b.x, b.y, b.color, 4);
+                spark(b.x, b.y, b.color, 3);
                 blip(280 + rand() * 60, 80, 'sawtooth', 0.05);
                 b._cooldown = 0.08;
               }
@@ -601,8 +679,24 @@
               b.vx += tx * kick * 0.5;
               b.vy += ty * kick * 0.5;
               if (b._cooldown <= 0) {
-                spark(b.x, b.y, o.color, 6);
+                spark(b.x, b.y, o.color, 4);
                 blip(180, 100, 'sawtooth', 0.07);
+                b._cooldown = 0.1;
+              }
+            }
+          } else if (o.kind === 'wallFlipper') {
+            const ex = o.cx + Math.cos(o.angle) * o.length;
+            const ey = o.cy + Math.sin(o.angle) * o.length;
+            if (collideSegment(b, o.cx, o.cy, ex, ey, o.thick / 2, 0.82)) {
+              hit = true;
+              const tx = -Math.sin(o.angle), ty = Math.cos(o.angle);
+              const wallPush = o.side === 'left' ? 1 : -1;
+              const smack = 0.55 + o.active * 3.2;
+              b.vx += tx * smack * 0.55 + wallPush * o.active * 1.3;
+              b.vy += ty * smack * 0.35 - o.active * 3.1;
+              if (b._cooldown <= 0) {
+                spark(b.x, b.y, o.color, 6);
+                blip(120 + o.active * 180, 120, 'sawtooth', 0.09);
                 b._cooldown = 0.1;
               }
             }
@@ -617,7 +711,7 @@
               b.vx += tx * kick * 0.4;
               b.vy += ty * kick * 0.4;
               if (b._cooldown <= 0) {
-                spark(b.x, b.y, o.color, 5);
+                spark(b.x, b.y, o.color, 4);
                 blip(240, 80, 'square', 0.05);
                 b._cooldown = 0.08;
               }
@@ -633,7 +727,7 @@
               b.vx += tx * kick * 0.6;
               b.vy += ty * kick * 0.6;
               if (b._cooldown <= 0) {
-                spark(b.x, b.y, o.color, 8);
+                spark(b.x, b.y, o.color, 5);
                 blip(140, 130, 'sawtooth', 0.09);
                 b._cooldown = 0.12;
               }
@@ -649,7 +743,7 @@
               if (collideSegment(b, 20, o.y, hs, o.y, ht)) {
                 hit = true;
                 if (b._cooldown <= 0) {
-                  spark(b.x, b.y, o.color, 4);
+                  spark(b.x, b.y, o.color, 3);
                   blip(220, 80, 'sawtooth', 0.05);
                   b._cooldown = 0.08;
                 }
@@ -658,7 +752,7 @@
               if (collideSegment(b, he, o.y, W - 20, o.y, ht)) {
                 hit = true;
                 if (b._cooldown <= 0) {
-                  spark(b.x, b.y, o.color, 4);
+                  spark(b.x, b.y, o.color, 3);
                   blip(220, 80, 'sawtooth', 0.05);
                   b._cooldown = 0.08;
                 }
@@ -670,6 +764,7 @@
       }
 
       b._cooldown = Math.max(0, b._cooldown - 0.016 * dt);
+      clampBallSpeed(b);
 
       // No multiplicative friction on contact — let the marble keep its
       // tangential speed so rolling on slopes actually accelerates instead
@@ -680,7 +775,7 @@
       if (b._trailT > 1.6) {
         b._trailT = 0;
         b.trail.push(b.x, b.y);
-        if (b.trail.length > 24) b.trail.splice(0, 2);
+        if (b.trail.length > 18) b.trail.splice(0, 2);
       }
 
       // Finish?
@@ -726,6 +821,8 @@
           const dv = vc - va;
           a.vx += dv * nx * 0.7; a.vy += dv * ny * 0.7;
           c.vx -= dv * nx * 0.7; c.vy -= dv * ny * 0.7;
+          clampBallSpeed(a);
+          clampBallSpeed(c);
         }
       }
     }
@@ -823,6 +920,22 @@
       ctx.beginPath(); ctx.arc(o.cx, o.cy, 5, 0, Math.PI * 2); ctx.fill();
       ctx.strokeStyle = COLORS.cyan; ctx.lineWidth = 1.5;
       ctx.beginPath(); ctx.arc(o.cx, o.cy, 5, 0, Math.PI * 2); ctx.stroke();
+    } else if (o.kind === 'wallFlipper') {
+      const ex = o.cx + Math.cos(o.angle) * o.length;
+      const ey = o.cy + Math.sin(o.angle) * o.length;
+      ctx.strokeStyle = o.color;
+      ctx.lineWidth = o.thick + o.active * 3;
+      ctx.lineCap = 'round';
+      ctx.shadowColor = o.color;
+      ctx.shadowBlur = 6 + o.active * 10;
+      ctx.beginPath();
+      ctx.moveTo(o.cx, o.cy); ctx.lineTo(ex, ey);
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = COLORS.bg;
+      ctx.beginPath(); ctx.arc(o.cx, o.cy, 7, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = COLORS.finish; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(o.cx, o.cy, 7, 0, Math.PI * 2); ctx.stroke();
     } else if (o.kind === 'gear') {
       ctx.save();
       ctx.translate(o.cx, o.cy);
@@ -887,7 +1000,7 @@
     if (!b.alive) return;
     ctx.save();
     ctx.shadowColor = b.color;
-    ctx.shadowBlur = 22;
+    ctx.shadowBlur = 16;
     ctx.fillStyle = b.color;
     ctx.beginPath();
     ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
@@ -948,14 +1061,30 @@
   }
 
   // ───────────────────────────── Lifecycle
+  function clampYesBallCount(value) {
+    const n = Number.isFinite(value) ? Math.round(value) : DEFAULT_YES_BALLS;
+    return Math.max(1, Math.min(TOTAL_BALLS - 1, n));
+  }
+
+  function updateWeightUI() {
+    yesBallCount = clampYesBallCount(yesBallCount);
+    const noBallCount = TOTAL_BALLS - yesBallCount;
+    if (weightSlider) {
+      weightSlider.value = String(yesBallCount);
+      weightSlider.setAttribute('aria-valuetext', `YES ${yesBallCount}, NO ${noBallCount}`);
+    }
+    if (weightText) weightText.textContent = `YES ${yesBallCount} / NO ${noBallCount}`;
+  }
+
   function spawnBalls() {
     balls = [];
     // One seeded-random horizontal lineup across the top. Slots prevent
     // instant overlap; shuffled team order and jitter make starts vary.
     const lineup = [];
-    for (let i = 0; i < BALLS_PER_TEAM; i++) {
-      lineup.push('yes', 'no');
-    }
+    const yesCount = clampYesBallCount(yesBallCount);
+    const noCount = TOTAL_BALLS - yesCount;
+    for (let i = 0; i < yesCount; i++) lineup.push('yes');
+    for (let i = 0; i < noCount; i++) lineup.push('no');
     for (let i = lineup.length - 1; i > 0; i--) {
       const j = Math.floor(rand() * (i + 1));
       const tmp = lineup[i]; lineup[i] = lineup[j]; lineup[j] = tmp;
@@ -1017,11 +1146,7 @@
     verdict.className = 'verdict ' + which;
     const secs = (raceElapsed / 1000).toFixed(1);
     const margin = winnerMarginPx;
-    let marginLabel;
-    if (margin <= 6) marginLabel = 'PHOTO FINISH';
-    else if (margin <= 50)  marginLabel = `WON BY ${margin} PX`;
-    else if (margin <= 200) marginLabel = `WON BY A NOSE — ${margin} PX`;
-    else marginLabel = `WON GOING AWAY — ${margin} PX`;
+    const marginLabel = margin <= 6 ? 'PHOTO FINISH' : `FIRST BY ${margin} PX`;
     resultMeta.textContent = `${secs}S · ${marginLabel}`;
     result.classList.remove('hidden');
     hud.classList.add('hidden');
@@ -1034,9 +1159,11 @@
       const u = new URL(window.location.href);
       const seedRaw = u.searchParams.get('seed');
       const q = u.searchParams.get('q') || '';
+      const wRaw = u.searchParams.get('w');
       const seed = seedRaw ? (parseInt(seedRaw, 16) >>> 0) : null;
-      return { seed, q };
-    } catch (e) { return { seed: null, q: '' }; }
+      const weight = wRaw ? clampYesBallCount(parseInt(wRaw, 10)) : DEFAULT_YES_BALLS;
+      return { seed, q, weight };
+    } catch (e) { return { seed: null, q: '', weight: DEFAULT_YES_BALLS }; }
   }
   function writeUrlState() {
     try {
@@ -1044,6 +1171,8 @@
       u.searchParams.set('seed', currentSeed.toString(16));
       const q = (qInput.value || '').trim();
       if (q) u.searchParams.set('q', q); else u.searchParams.delete('q');
+      if (yesBallCount !== DEFAULT_YES_BALLS) u.searchParams.set('w', String(yesBallCount));
+      else u.searchParams.delete('w');
       window.history.replaceState({}, '', u.toString());
     } catch (e) {}
   }
@@ -1106,6 +1235,15 @@
   qInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); flipBtn.click(); }
   });
+  settingsToggle.addEventListener('click', () => {
+    const open = settingsPanel.classList.contains('hidden');
+    settingsPanel.classList.toggle('hidden', !open);
+    settingsToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+  });
+  weightSlider.addEventListener('input', () => {
+    yesBallCount = clampYesBallCount(parseInt(weightSlider.value, 10));
+    updateWeightUI();
+  });
   againBtn.addEventListener('click', () => {
     mode = 'idle';
     winner = null;
@@ -1135,8 +1273,10 @@
 
   // ───────────────────────────── Boot
   (() => {
-    const { seed, q } = parseUrl();
+    const { seed, q, weight } = parseUrl();
     if (q && !qInput.value) qInput.value = q;
+    yesBallCount = weight;
+    updateWeightUI();
     if (seed != null) pendingSeed = seed;
     // Bake an idle backdrop so the menu has something nice behind it
     buildCourse((Math.random() * 0xffffffff) >>> 0);

@@ -101,9 +101,9 @@ html, body {
 /* — Menu — */
 .neon {
   font-family: "Courier New", ui-monospace, monospace;
-  font-size: clamp(48px, 8.8vw, 104px);
+  font-size: clamp(38px, 6.8vw, 86px);
   margin: 0;
-  letter-spacing: 0.18em;
+  letter-spacing: 0.1em;
   color: var(--cyan);
   line-height: 0.9;
   text-shadow:
@@ -182,9 +182,69 @@ html, body {
 }
 .btn:hover { background: rgba(51, 215, 255, 0.08); border-color: var(--cyan); }
 
-.big-btn:focus-visible, .btn:focus-visible, #question:focus-visible {
+.big-btn:focus-visible, .btn:focus-visible, .settings-toggle:focus-visible, .weight-slider:focus-visible, #question:focus-visible {
   outline: 2px solid var(--amber);
   outline-offset: 3px;
+}
+
+.settings-toggle {
+  margin-top: -4px;
+  padding: 8px 18px;
+  font-family: "Courier New", ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  color: rgba(216, 232, 255, 0.72);
+  background: rgba(2, 3, 10, 0.42);
+  border: 1px solid rgba(155, 124, 255, 0.34);
+  border-radius: 6px;
+  cursor: pointer;
+  text-transform: uppercase;
+  transition: color 160ms, border-color 160ms, background-color 160ms;
+}
+.settings-toggle:hover,
+.settings-toggle[aria-expanded="true"] {
+  color: var(--cyan);
+  border-color: rgba(51, 215, 255, 0.5);
+  background: rgba(51, 215, 255, 0.07);
+}
+
+.settings-panel {
+  width: min(360px, calc(100vw - 56px));
+  padding: 12px 14px;
+  background: rgba(2, 3, 10, 0.58);
+  border: 1px solid rgba(51, 215, 255, 0.2);
+  border-radius: 6px;
+}
+
+.weight-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 10px;
+  font-family: "Courier New", ui-monospace, monospace;
+  text-transform: uppercase;
+}
+.weight-head label {
+  color: rgba(216, 232, 255, 0.62);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+}
+.weight-head span {
+  color: var(--cyan);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  white-space: nowrap;
+}
+
+.weight-slider {
+  display: block;
+  width: 100%;
+  accent-color: var(--cyan);
+  cursor: pointer;
 }
 
 .hint {
@@ -341,6 +401,8 @@ html, body {
   .sub, .hint { letter-spacing: 0.1em; }
   .big-btn { width: min(260px, calc(100vw - 64px)); padding: 16px 24px; letter-spacing: 0.24em; }
   .btn { width: min(260px, calc(100vw - 64px)); }
+  .settings-panel { width: min(300px, calc(100vw - 64px)); }
+  .weight-head { gap: 10px; }
   .hud-question { font-size: 13px; }
 }
 

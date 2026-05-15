@@ -3,22 +3,22 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-<meta name="description" content="A neon marble-race yes/no oracle. Ask a question; YES and NO race down a chaotic obstacle course; first to the finish line answers." />
+<meta name="description" content="A neon Rube-Goldberg yes/no race. Ask a question; YES and NO marbles tumble through a chaotic obstacle machine." />
 <meta name="theme-color" content="#03040a" />
 <meta name="color-scheme" content="dark" />
 
-<meta property="og:title" content="FLIPPER — neon marble-race oracle" />
-<meta property="og:description" content="Ask a yes/no question. Two marbles race down a chaotic obstacle course. First to the finish line answers." />
+<meta property="og:title" content="Goldberg Flip" />
+<meta property="og:description" content="Ask a yes/no question. YES and NO marbles race through a neon Rube-Goldberg machine." />
 <meta property="og:type" content="website" />
 <meta name="twitter:card" content="summary_large_image" />
 
-<title>FLIPPER</title>
+<title>Goldberg Flip</title>
 <link rel="icon" type="image/svg+xml" href="favicon.svg" />
 <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <main id="stage">
-    <canvas id="world" width="700" height="980" role="img" aria-label="Neon marble race between yes and no"></canvas>
+    <canvas id="world" width="700" height="980" role="img" aria-label="Neon Rube-Goldberg marble race between yes and no"></canvas>
 
     <div id="util" class="util">
       <button id="mute" class="icon-btn" type="button" aria-label="Mute audio" aria-pressed="false" title="Mute (M)">
@@ -42,11 +42,19 @@
     <!-- Menu (visible before the race) -->
     <section id="menu" class="overlay overlay-dim" aria-labelledby="title">
       <div class="panel">
-        <h1 id="title" class="neon">FLIPPER</h1>
-        <p class="sub">Ask the universe.</p>
+        <h1 id="title" class="neon">GOLDBERG FLIP</h1>
+        <p class="sub">Ask the machine.</p>
         <label class="sr-only" for="question">A yes or no question</label>
         <input id="question" type="text" placeholder="Ask a yes / no question" maxlength="80" autocomplete="off" autocapitalize="sentences" spellcheck="false" enterkeyhint="go" />
         <button id="flip" class="big-btn" type="button">DROP</button>
+        <button id="settingsToggle" class="settings-toggle" type="button" aria-expanded="false" aria-controls="settingsPanel">Settings</button>
+        <div id="settingsPanel" class="settings-panel hidden">
+          <div class="weight-head">
+            <label for="weightSlider">Weighting</label>
+            <span id="weightText">YES 5 / NO 5</span>
+          </div>
+          <input id="weightSlider" class="weight-slider" type="range" min="1" max="9" step="1" value="5" />
+        </div>
         <p class="hint hint-quiet"><kbd>Space</kbd> to drop</p>
       </div>
     </section>
