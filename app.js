@@ -295,8 +295,8 @@
         cx: p.x,
         cy: p.y,
         visR: 18,
-        pullR: 180,
-        strength: 0.85,
+        pullR: 250,
+        strength: 1.0,
         group: p.group,
         phase: rand() * Math.PI * 2,
         period: 2.2 + rand() * 0.6,
@@ -623,7 +623,9 @@
         o.phase += o.omega * dt;
         const pulse = Math.max(0, Math.sin(o.phase));
         o.active = pulse * pulse * pulse;
+        const prevAngle = o.angle;
         o.angle = o.baseAngle + o.swing * o.active;
+        o.angVel = (o.angle - prevAngle) / dt;
       } else if (o.kind === 'hammer') {
         o.phase += o.omega * dt;
         o.angle = o.baseAngle + Math.sin(o.phase) * o.amp;
@@ -712,11 +714,13 @@
             const ey = o.cy + Math.sin(o.angle) * o.length;
             if (collideSegment(b, o.cx, o.cy, ex, ey, o.thick / 2, 0.82)) {
               hit = true;
+              const dx = b.x - o.cx, dy = b.y - o.cy;
+              const contactDist = Math.min(Math.hypot(dx, dy), o.length);
               const tx = -Math.sin(o.angle), ty = Math.cos(o.angle);
-              const wallPush = o.side === 'left' ? 1 : -1;
-              const smack = 0.8 + o.active * 5.0;
-              b.vx += tx * smack * 0.6 + wallPush * o.active * 1.8;
-              b.vy += ty * smack * 0.4 - o.active * 5.5;
+              const av = o.angVel || 0;
+              const kick = av * contactDist * 3.5;
+              b.vx += tx * kick;
+              b.vy += ty * kick;
               if (b._cooldown <= 0) {
                 spark(b.x, b.y, o.color, 6);
                 blip(120 + o.active * 180, 120, 'sawtooth', 0.09);
