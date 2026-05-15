@@ -78,7 +78,8 @@
   const AIR_DRAG_Y       = 0.9994;
   const TERMINAL_VY      = 6.4;
   const RESTITUTION      = 0.66;    // default for walls/pegs/pads
-  const BUMPER_RESTITUTION = 0.95;  // pinball-style bumpers
+  const PLINKO_RESTITUTION = 0.82;  // a little livelier than rails
+  const BUMPER_RESTITUTION = 1.85;  // pinball-style bumpers, intentionally hot
   const BALL_R           = 16;
   const SUBSTEPS         = 3;       // physics sub-steps per render frame
   const BALLS_PER_TEAM   = 5;       // 5 YES + 5 NO marbles in each race
@@ -187,9 +188,9 @@
     pushStaticSegment(W - 20, 0, W - 20, WORLD_H, 4, COLORS.magenta);
 
     // Hand-designed sequence. Y coords laid out top-to-bottom.
-    buildStartFunnel(0);            //   0 — 240   one-marble-at-a-time bottleneck
+    buildStartFunnel(0);            //   0 — 240   opening plinko, immediately
     buildAngledRails(240);          // 240 — 480   two angled rails (deliberately spare)
-    buildPlinkoTwinFunnel(480);     // 480 — 1060  plinko into two adjacent funnels
+    buildPlinkoTwinFunnel(480);     // 480 — 1060  deeper plinko into twin funnels
     buildHexSpinners(1060);         // 1060 — 1980 hex tiling of 7 giant X rotors
     buildGateChannels(1980);        // 1980 — 2300 dividers + moving-hole gate
     buildPinballField(2300);        // 2300 — 2780 wall of bouncy circular bumpers
@@ -222,6 +223,17 @@
   function pushStaticCircle(x, y, r, color) {
     staticObs.push({ kind: 'circle', x, y, r, color });
   }
+  function pushPlinkoPeg(x, y, r, color) {
+    staticObs.push({
+      kind: 'circle',
+      x, y, r, color,
+      restitution: PLINKO_RESTITUTION
+    });
+  }
+  function pushPlinkoSideRails(y1, y2) {
+    pushStaticSegment(38, y1, 38, y2, 5, COLORS.cyan);
+    pushStaticSegment(W - 38, y1, W - 38, y2, 5, COLORS.magenta);
+  }
 
   // ───────────────────────────── The course
   // Marbles spawn at the top, side-by-side. Each stage below is hand-tuned.
@@ -236,14 +248,22 @@
     });
   }
 
-  // 1 · Shallow narrow funnel — only one marble fits through the gap at a
-  // time. Forces them to jostle right at the start.
+  // 1 · Opening plinko. The marbles hit pegs almost immediately, so the
+  // first split is chaotic instead of a queue into a bottleneck.
   function buildStartFunnel(y0) {
-    const top = y0 + 90;
-    const bot = y0 + 220;
-    const gap = 36;                    // marble diameter is 28
-    pushStaticSegment(W/2 - 110, top, W/2 - gap/2, bot, 7, COLORS.cyan);
-    pushStaticSegment(W/2 + 110, top, W/2 + gap/2, bot, 7, COLORS.magenta);
+    const rows = 3;
+    const left = 64;
+    const right = W - 64;
+    pushPlinkoSideRails(y0 + 72, y0 + 236);
+    for (let r = 0; r < rows; r++) {
+      const cols = 10 - (r % 2);
+      const gap = (right - left) / (cols - 1);
+      for (let c = 0; c < cols; c++) {
+        const px = left + gap * c;
+        const py = y0 + 96 + r * 58;
+        pushPlinkoPeg(px, py, 12, COLORS.cyan);
+      }
+    }
   }
 
   // 2 · Two angled rails — deliberately spare connector that fans the
@@ -255,22 +275,23 @@
 
   // 3 · Plinko field that drops into two side-by-side funnels.
   function buildPlinkoTwinFunnel(y0) {
-    // Dense plinko (5 rows, 7–8 cols)
-    const rows = 5;
-    const inset = 36;
+    // Dense plinko (7 rows, 9–10 cols)
+    const rows = 7;
+    const left = 62;
+    const right = W - 62;
+    pushPlinkoSideRails(y0 + 14, y0 + 402);
     for (let r = 0; r < rows; r++) {
-      const cols = 7 + (r % 2);
-      const span = W - inset * 2;
-      const gap = span / (cols + 1);
+      const cols = 9 + (r % 2);
+      const gap = (right - left) / (cols - 1);
       for (let c = 0; c < cols; c++) {
-        const px = inset + gap * (c + 1) + ((r % 2) ? -gap/2 : 0);
-        const py = y0 + 40 + r * 64;
-        pushStaticCircle(px, py, 13, COLORS.cyan);
+        const px = left + gap * c;
+        const py = y0 + 40 + r * 54;
+        pushPlinkoPeg(px, py, 13, COLORS.cyan);
       }
     }
     // Twin funnels below — split the canvas left / right with a center pin.
-    const fTop = y0 + 400;
-    const fBot = y0 + 540;
+    const fTop = y0 + 430;
+    const fBot = y0 + 570;
     pushStaticSegment(50,        fTop,  W/4 - 22,    fBot, 6, COLORS.cyan);
     pushStaticSegment(W/2 - 28,  fTop,  W/4 + 22,    fBot, 6, COLORS.cyan);
     pushStaticSegment(W/2 + 28,  fTop,  3*W/4 - 22,  fBot, 6, COLORS.magenta);
@@ -523,7 +544,7 @@
 
     // Integrate + collide each ball
     for (const b of balls) {
-      if (!b.alive || b.finished) continue;
+      if (!b.alive) continue;
 
       // Forces
       const trailing = Math.max(0, leaderY - b.y);
@@ -929,30 +950,36 @@
   // ───────────────────────────── Lifecycle
   function spawnBalls() {
     balls = [];
-    // 5 YES + 5 NO arranged 2 rows × 5 cols, alternating teams per cell so
-    // neither team has spatial advantage at the start funnel.
-    const cols = BALLS_PER_TEAM;
-    const xStart = W * 0.30;
-    const xEnd   = W * 0.70;
-    for (let row = 0; row < 2; row++) {
-      const yy = 36 + row * (BALL_R * 2 + 6);
-      for (let col = 0; col < cols; col++) {
-        const isYes = ((row + col) % 2 === 0);
-        const x0 = xStart + (xEnd - xStart) * (col / (cols - 1));
-        balls.push({
-          label: isYes ? 'yes' : 'no',
-          color: isYes ? COLORS.yesBall : COLORS.noBall,
-          x: x0 + rrange(-3, 3),
-          y: yy,
-          vx: rrange(-0.25, 0.25),
-          vy: 0,
-          r: BALL_R,
-          alive: true,
-          finished: false,
-          trail: [],
-          _cooldown: 0
-        });
-      }
+    // One seeded-random horizontal lineup across the top. Slots prevent
+    // instant overlap; shuffled team order and jitter make starts vary.
+    const lineup = [];
+    for (let i = 0; i < BALLS_PER_TEAM; i++) {
+      lineup.push('yes', 'no');
+    }
+    for (let i = lineup.length - 1; i > 0; i--) {
+      const j = Math.floor(rand() * (i + 1));
+      const tmp = lineup[i]; lineup[i] = lineup[j]; lineup[j] = tmp;
+    }
+
+    const xStart = W * 0.12;
+    const xEnd   = W * 0.88;
+    const yy = 54;
+    for (let i = 0; i < lineup.length; i++) {
+      const label = lineup[i];
+      const x0 = xStart + (xEnd - xStart) * (i / (lineup.length - 1));
+      balls.push({
+        label,
+        color: label === 'yes' ? COLORS.yesBall : COLORS.noBall,
+        x: x0 + rrange(-10, 10),
+        y: yy + rrange(-4, 4),
+        vx: rrange(-0.35, 0.35),
+        vy: 0,
+        r: BALL_R,
+        alive: true,
+        finished: false,
+        trail: [],
+        _cooldown: 0
+      });
     }
   }
 
