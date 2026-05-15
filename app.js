@@ -463,7 +463,7 @@
       side,
       cx: wallX,
       cy: y,
-      length: 100,
+      length: 120,
       thick: 14,
       baseAngle: base,
       swing,
